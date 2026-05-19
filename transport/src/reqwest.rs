@@ -10,7 +10,7 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str) -> Self {
         Self{base_url: format!("{}/rpc/", base_url)}
     }
 }
