@@ -53,7 +53,7 @@ impl Payload {
 }
 
 impl Error {
-    fn surely_encode<C: UnaryCodec> (&self) -> Payload {
+    pub(crate) fn surely_encode<C: UnaryCodec> (&self) -> Payload {
         match self.encode::<C>() {
             Ok(encoded) => encoded,
             Err(_) => Payload::new("Error in encoding Error".as_bytes())
@@ -123,59 +123,5 @@ pub enum CallResponse {
     Progress(Payload)
 }
 
-pub trait Transport {
-    fn send_payload(&self, payload: Payload) -> impl Future<Output = Result<Payload>> + Send;
-}
 
-pub trait ClientSideTransport<C: UnaryCodec> {
-    fn execute_method_call(&self, call: MethodCall) -> impl Future<Output = Result<Payload>> + Send;
-    //async fn execute_module_method_call(&self, call: ModuleMethodCall) -> Result<Payload>;
-    //async fn execute_relayed_module_method_call(&self, call: RelayedModuleMethodCall) -> Result<Payload>;
-}
 
-impl<T: Transport + Sync, C: UnaryCodec> ClientSideTransport<C> for T {
-    fn execute_method_call(
-        &self,
-        call: MethodCall,
-    ) -> impl Future<Output = Result<Payload>> + Send  {
-        async move {
-            match call.encode::<C>() {
-                Ok(encoded) => self.send_payload(encoded).await,
-                Err(e) => Ok(e.surely_encode::<C>()),
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Frame (i64, Payload);
-
-use std::sync::atomic::{Ordering};
-use crate::non_negative_i64::NonNegativeWrappingAtomicI64;
-static FRAMECOUNTER: NonNegativeWrappingAtomicI64 = NonNegativeWrappingAtomicI64::new(0);
-
-impl Frame {
-    pub fn new (payload: Payload) -> Self {
-        Self(FRAMECOUNTER.fetch_inc_wrap(Ordering::Relaxed), payload)
-    }
-    pub fn response_to (frame: &Frame, payload: Payload) -> Self {
-        Self(-frame.get_id(), payload)
-    }
-    pub fn get_id(&self) -> i64 {
-        self.0
-    }
-    pub fn get_payload(&self) -> &Payload {
-        &self.1
-    }
-    pub fn is_request(&self) -> bool {
-        self.0 > 0
-    }
-    pub fn is_response(&self) -> bool {
-        self.0 < 0
-    }
-}
-
-pub trait ServerSideTransport {
-    type FrameStream: Stream<Item = Frame>;
-    fn get_incoming_stream(&self) -> Self::FrameStream;
-}

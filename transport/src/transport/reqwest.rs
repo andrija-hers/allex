@@ -1,4 +1,5 @@
 use crate::types::*;
+use crate::transport::OneShotTransport;
 
 impl From<reqwest::Error> for Error {
     fn from(value: reqwest::Error) -> Self {
@@ -15,7 +16,7 @@ impl HttpTransport {
     }
 }
 
-impl Transport for HttpTransport {
+impl OneShotTransport for HttpTransport {
     fn send_payload(
         &self,
         payload: Payload,
