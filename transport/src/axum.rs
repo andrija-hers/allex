@@ -4,8 +4,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::types::*;
 
 pub struct AxumTransport<C: UnaryCodec> {
-    rx: tokio::sync::Mutex<Option<mpsc::Receiver<Payload>>>,
-    tx: mpsc::Sender<Payload>,
+    rx: tokio::sync::Mutex<Option<mpsc::Receiver<Frame>>>,
+    tx: mpsc::Sender<Frame>,
     _codec: PhantomData<C>,
 }
 
@@ -23,9 +23,9 @@ impl<C: UnaryCodec> AxumTransport<C> {
 
 
 impl<C: UnaryCodec> ServerSideTransport for AxumTransport<C> {
-    type PayloadStream = ReceiverStream<Payload>;
+    type FrameStream = ReceiverStream<Frame>;
 
-    fn get_incoming_stream(&self) -> Self::PayloadStream {
+    fn get_incoming_stream(&self) -> Self::FrameStream {
         let mut guard = self.rx.blocking_lock();
 
         let rx = guard
@@ -44,12 +44,12 @@ use axum::{
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     pub async fn handle_post(
-        State(tx): State<mpsc::Sender<Payload>>,
+        State(tx): State<mpsc::Sender<Frame>>,
         body: Bytes,
     ) -> StatusCode {
-        match C::decode::<Payload>(&body) {
-            Ok(payload) => {
-                match tx.send(payload).await {
+        match C::decode::<Frame>(&body) {
+            Ok(frame) => {
+                match tx.send(frame).await {
                     Ok(_) => StatusCode::OK,
                     Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 }

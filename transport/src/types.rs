@@ -147,7 +147,10 @@ impl<T: Transport + Sync, C: UnaryCodec> ClientSideTransport<C> for T {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame (u64, Payload);
+
 pub trait ServerSideTransport {
-    type PayloadStream: Stream<Item = Payload>;
-    fn get_incoming_stream(&self) -> Self::PayloadStream;
+    type FrameStream: Stream<Item = Frame>;
+    fn get_incoming_stream(&self) -> Self::FrameStream;
 }
