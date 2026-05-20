@@ -1,5 +1,5 @@
 use transport::{Error, UnaryCodec};
-use arithmetic_base::*;
+use arithmetic_base::{AddResult, MulResult};
 //glue code
 pub trait ArithmeticV1Client<C: UnaryCodec> {
     fn add(&self, first: i32, second: i32) -> impl Future<Output = Result<AddResult, Error>> + Send;

@@ -1,9 +1,7 @@
-use arithmetic_base::*;
 mod arithmetic_client;
 use arithmetic_client::*;
 mod arithmetic_one_shot_client;
 mod arithmetic_server_impl;
-mod arithmetic_one_shot_axum_server;
 
 use transport::{Error, HttpTransport, JsonCodec};
 
