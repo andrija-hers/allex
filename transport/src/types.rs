@@ -1,31 +1,4 @@
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
-use futures::Stream;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Error {
-    SendRequest(String)
-}
-
-
-pub type Result<T> = core::result::Result<T, Error>;
-
-pub trait UnaryCodec {
-    /// Decode bytes into type T
-    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T>;
-
-    /// Encode value of type T into bytes
-    fn encode<T: Serialize>(value: &T) -> Result<Payload>;
-}
-
-pub trait Encodable {
-    fn encode <C: UnaryCodec> (&self) -> Result<Payload>;
-}
-
-impl <T: Serialize> Encodable for T {
-    fn encode <C: UnaryCodec> (&self) -> Result<Payload> {
-        C::encode(&self)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payload(Vec<u8>);
@@ -49,6 +22,34 @@ impl Payload {
         T: DeserializeOwned,
     {
         C::decode::<T>(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Error {
+    Serialize(String),
+    Deserialize(String),
+    SendRequest(String),
+    App(Payload)
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+pub trait UnaryCodec {
+    /// Decode bytes into type T
+    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T>;
+
+    /// Encode value of type T into bytes
+    fn encode<T: Serialize>(value: &T) -> Result<Payload>;
+}
+
+pub trait Encodable {
+    fn encode <C: UnaryCodec> (&self) -> Result<Payload>;
+}
+
+impl <T: Serialize> Encodable for T {
+    fn encode <C: UnaryCodec> (&self) -> Result<Payload> {
+        C::encode(&self)
     }
 }
 

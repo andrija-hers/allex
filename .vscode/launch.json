@@ -1,0 +1,80 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug unit tests in library 'transport'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=transport"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'arithmetic_base'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=arithmetic-base"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'arithmetic-client'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=arithmetic-client",
+                    "--package=arithmetic-client"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'arithmetic-client'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=arithmetic-client",
+                    "--package=arithmetic-client"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'arithmetic_server'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=arithmetic_server",
+                    "--package=arithmetic_server"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'arithmetic_server'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=arithmetic_server",
+                    "--package=arithmetic_server"
+                ]
+            }
+        }
+    ]
+}
