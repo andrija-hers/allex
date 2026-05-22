@@ -9,7 +9,7 @@ use transport::{Error, HttpTransport, JsonCodec};
 
 #[tokio::main]
 pub async fn main () -> Result<(), Error>{
-    let http_transport = HttpTransport::new("https://dateright.com");
+    let http_transport = HttpTransport::new("http://127.0.0.1:3300");
     let add_result = 
     <HttpTransport as ArithmeticV1Client<JsonCodec>>::add(
         &http_transport, 

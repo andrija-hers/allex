@@ -1,18 +1,13 @@
 use crate::types::*;
 use crate::transport::OneShotTransport;
 
-impl From<reqwest::Error> for Error {
-    fn from(value: reqwest::Error) -> Self {
-        Error::SendRequest(format!("Reqwest: {}", value.to_string()))
-    }
-}
 pub struct HttpTransport {
     base_url: String,
 }
 
 impl HttpTransport {
     pub fn new(base_url: &str) -> Self {
-        Self{base_url: format!("{}/rpc/", base_url)}
+        Self{base_url: format!("{}/rpc", base_url)}
     }
 }
 
@@ -30,11 +25,13 @@ impl OneShotTransport for HttpTransport {
                 .post(&url)
                 .json(&payload)
                 .send()
-                .await?;
+                .await
+                .map_err(|e| Error::SendRequest(format!("Could not send {} bytes to {}: {}", payload.len(), url, e.to_string())))?;
 
             let payload = response
                 .json::<Payload>()
-                .await?;
+                .await
+                .map_err(|e| Error::ReceiveResponse(format!("Could not recieve from {}: {}", url, e.to_string())))?;
 
             Ok(payload)
         }

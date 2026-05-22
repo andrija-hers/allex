@@ -1,12 +1,12 @@
 use std::marker::PhantomData;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use crate::types::*;
-use crate::transport::{Frame, ServerSideTransport};
+use crate::transport::{Frame, ServerSideOneShotTransport, ServerSideOneShotTransportItem};
 
 pub struct AxumTransport<C: UnaryCodec> {
-    rx: tokio::sync::Mutex<Option<mpsc::Receiver<Frame>>>,
-    tx: mpsc::Sender<Frame>,
+    rx: tokio::sync::Mutex<Option<mpsc::Receiver<AxumOneShotItem>>>,
+    tx: mpsc::Sender<AxumOneShotItem>,
     _codec: PhantomData<C>,
 }
 
@@ -16,18 +16,38 @@ impl<C: UnaryCodec> AxumTransport<C> {
 
         Self {
             tx,
-            rx: tokio::sync::Mutex::new(Some(rx)),
+            rx: Mutex::new(Some(rx)),
             _codec: PhantomData,
         }
     }
 }
 
+pub struct AxumOneShotItem {
+    payload: Payload,
+    response: tokio::sync::oneshot::Sender<Payload>,
+}
 
-impl<C: UnaryCodec> ServerSideTransport for AxumTransport<C> {
-    type FrameStream = ReceiverStream<Frame>;
+impl ServerSideOneShotTransportItem for AxumOneShotItem {
+    fn get_payload(&self) -> &Payload {
+        &self.payload
+    }
 
-    fn get_incoming_stream(&self) -> Self::FrameStream {
-        let mut guard = self.rx.blocking_lock();
+    async fn respond_with(
+        self,
+        payload: Payload,
+    ) -> Result<()> {
+        self.response
+            .send(payload)
+            .map_err(|e| Error::SendRequest(format!("Could not send {} bytes, the caller dropped", e.len())))
+    }
+}
+
+impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
+    type Item = AxumOneShotItem;
+    type ItemStream = ReceiverStream<Self::Item>;
+
+    async fn get_incoming_stream(&self) -> Self::ItemStream {
+        let mut guard = self.rx.lock().await;
 
         let rx = guard
             .take()
@@ -37,25 +57,48 @@ impl<C: UnaryCodec> ServerSideTransport for AxumTransport<C> {
     }
 }
 
+
 use axum::{
     body::Bytes,
     extract::State,
     http::StatusCode,
+    response::IntoResponse
 };
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     pub async fn handle_post(
-        State(tx): State<mpsc::Sender<Frame>>,
+        State(tx): State<mpsc::Sender<AxumOneShotItem>>,
         body: Bytes,
-    ) -> StatusCode {
-        match C::decode::<Frame>(&body) {
-            Ok(frame) => {
-                match tx.send(frame).await {
-                    Ok(_) => StatusCode::OK,
-                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                }
-            }
-            Err(_) => StatusCode::BAD_REQUEST,
+    ) -> impl IntoResponse {
+        // 1. Decode request body
+        let payload = match C::decode::<Payload>(&body) {
+            Ok(payload) => payload,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        };
+
+        // 2. Create response channel
+        let (response_tx, response_rx) = oneshot::channel();
+
+        // 3. Send request into transport
+        let item = AxumOneShotItem {
+            payload,
+            response: response_tx,
+        };
+
+        if tx.send(item).await.is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+
+        // 4. Wait for server-side logic to produce response
+        let response_payload = match response_rx.await {
+            Ok(payload) => payload,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+
+        // 5. Encode response and return as HTTP body
+        match C::encode(&response_payload) {
+            Ok(bytes) => bytes.get_bytes_forever().into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     }
 }

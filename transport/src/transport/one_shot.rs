@@ -1,5 +1,4 @@
-use std::process::Output;
-
+use futures::Stream;
 use serde::Serialize;
 
 use crate::*;
@@ -50,3 +49,18 @@ impl <T: OneShotTransport + Sync, C: UnaryCodec, P: Serialize> ClientSideOneShot
 }
 
 
+pub trait ServerSideOneShotTransportItem {
+    fn get_payload(&self) -> &Payload;
+
+    fn respond_with(
+        self,
+        payload: Payload,
+    ) -> impl Future<Output = Result<()>> + Send;
+}
+
+pub trait ServerSideOneShotTransport {
+    type Item: ServerSideOneShotTransportItem;
+    type ItemStream: Stream<Item = Self::Item>;
+
+    fn get_incoming_stream(&self) -> impl Future<Output = Self::ItemStream>;
+}

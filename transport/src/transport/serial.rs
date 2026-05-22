@@ -30,7 +30,7 @@ impl Frame {
     }
 }
 
-pub trait ServerSideTransport {
+pub trait ServerSideSerialTransport {
     type FrameStream: Stream<Item = Frame>;
     fn get_incoming_stream(&self) -> Self::FrameStream;
 }

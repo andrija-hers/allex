@@ -16,6 +16,10 @@ impl Payload {
         &self.0
     }
 
+    pub fn get_bytes_forever(self) -> Vec<u8> {
+        self.0
+    }
+
     pub fn decode<C, T>(&self) -> Result<T>
     where
         C: UnaryCodec,
@@ -30,6 +34,7 @@ pub enum Error {
     Serialize(String),
     Deserialize(String),
     SendRequest(String),
+    ReceiveResponse(String),
     App(Payload)
 }
 
