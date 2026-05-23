@@ -2,7 +2,8 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
 
-use crate::{Payload, Result, Error, Executor, ModuleExecutor, RelayedModuleExecutor};
+use transport::{Payload, Result, Error};
+use crate::{Executor, ModuleExecutor, RelayedModuleExecutor};
 
 pub struct ModuleRegistry {
     modules: DashMap<String, Arc<dyn Executor>>,

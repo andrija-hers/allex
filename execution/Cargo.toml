@@ -1,0 +1,9 @@
+[package]
+name = "execution"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+dashmap = "6.2.1"
+transport = { version = "0.1.0", path = "../transport" }

@@ -4,4 +4,4 @@ members = [
     "transport",
     "examples/arithmetic_base",
     "examples/arithmetic_client"
-, "examples/arithmetic_server"]
+, "examples/arithmetic_server", "execution"]
