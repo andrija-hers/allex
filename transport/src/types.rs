@@ -34,6 +34,8 @@ pub enum Error {
     Serialize(String),
     Deserialize(String),
     SendRequest(String),
+    ModuleNotFound,
+    ServerNotFound,
     ReceiveResponse(String),
     App(Payload)
 }

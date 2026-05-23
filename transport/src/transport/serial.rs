@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use futures::Stream;
 use crate::{Encodable, MethodCall, ModuleMethodCall, RelayedModuleMethodCall, UnaryCodec, types::{Payload, Result}};
-use std::{process::Output, sync::atomic::Ordering};
+use std::{sync::atomic::Ordering};
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
