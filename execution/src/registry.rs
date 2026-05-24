@@ -3,24 +3,29 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use transport::{Payload, Result, Error};
-use crate::{Executor, ModuleExecutor, RelayedModuleExecutor};
+use crate::{MethodExecutor, ModuleExecutor, RelayedModuleExecutor};
 
-pub struct ModuleRegistry {
-    modules: DashMap<String, Arc<dyn Executor>>,
+pub struct Registry {
+    servers: DashMap<String, Arc<dyn ModuleExecutor>>,
+    modules: DashMap<String, Arc<dyn MethodExecutor>>,
 }
 
-impl ModuleRegistry {
+impl Registry {
     pub fn new() -> Self {
-        Self { modules: DashMap::new() }
+        Self { servers: DashMap::new(), modules: DashMap::new() }
     }
 
-    pub fn register(&self, module: Arc<dyn Executor>) {
+    pub fn register_server(&self, name: &str, executor: Arc<dyn ModuleExecutor>) {
+        self.servers.insert(name.to_string(), executor);
+    }
+
+    pub fn register_module (&self, module: Arc<dyn MethodExecutor>) {
         self.modules.insert(module.get_name().to_string(), module);
     }
 }
 
 #[async_trait]
-impl ModuleExecutor for ModuleRegistry {
+impl ModuleExecutor for Registry {
     async fn execute(&self, module: &str, method: &str, payload: Payload) -> Result<Payload> {
         match self.modules.get(module) {
             Some(executor) => executor.execute(method, payload).await,
@@ -29,22 +34,8 @@ impl ModuleExecutor for ModuleRegistry {
     }
 }
 
-pub struct ServerRegistry {
-    servers: DashMap<String, Arc<dyn ModuleExecutor>>,
-}
-
-impl ServerRegistry {
-    pub fn new() -> Self {
-        Self { servers: DashMap::new() }
-    }
-
-    pub fn register(&self, name: &str, executor: Arc<dyn ModuleExecutor>) {
-        self.servers.insert(name.to_string(), executor);
-    }
-}
-
 #[async_trait]
-impl RelayedModuleExecutor for ServerRegistry {
+impl RelayedModuleExecutor for Registry {
     async fn execute(&self, server: &str, module: &str, method: &str, payload: Payload) -> Result<Payload> {
         match self.servers.get(server) {
             Some(executor) => executor.execute(module, method, payload).await,

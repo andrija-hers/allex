@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use transport::{Payload, Result};
 
 #[async_trait]
-pub trait Executor: Send + Sync {
+pub trait MethodExecutor: Send + Sync {
     fn get_name(&self) -> &str;
     async fn execute(&self, method: &str, payload: Payload) -> Result<Payload>;
 }
@@ -19,3 +19,5 @@ pub trait RelayedModuleExecutor: Send + Sync {
 
 mod registry;
 pub use registry::*;
+mod response;
+pub use response::*;
