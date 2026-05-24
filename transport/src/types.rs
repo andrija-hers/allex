@@ -61,7 +61,7 @@ impl <T: Serialize> Encodable for T {
 }
 
 impl Error {
-    pub(crate) fn surely_encode<C: UnaryCodec> (&self) -> Payload {
+    pub fn surely_encode<C: UnaryCodec> (&self) -> Payload {
         match self.encode::<C>() {
             Ok(encoded) => encoded,
             Err(_) => Payload::new("Error in encoding Error".as_bytes())
