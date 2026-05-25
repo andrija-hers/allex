@@ -11,7 +11,7 @@ where
         let result = 
         <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
             self, 
-            "ArithmeticV1", 
+            "arithmetic_v1", 
             "add", 
             AddRequest{a: first, b: second})
             .await?.
@@ -22,7 +22,7 @@ where
         let result = 
         <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
             self, 
-            "ArithmeticV1", 
+            "arithmetic_v1", 
             "mul", 
             AddRequest{a: first, b: second})
             .await?.

@@ -50,9 +50,7 @@ where
 
         match response {
             Response::Success(v)
-            | Response::Progress(v) => {
-                T::Codec::encode(&v)
-            }
+            | Response::Progress(v) => Ok(v),
 
             Response::Error(err) => {
                 Err(Error::App(err))
