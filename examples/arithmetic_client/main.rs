@@ -1,5 +1,4 @@
 use arithmetic_base::*;
-mod arithmetic_server_impl;
 
 use transport::{Error, HttpTransport, JsonCodec};
 

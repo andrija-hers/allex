@@ -1,5 +1,3 @@
-use core::ascii;
-
 use async_trait::async_trait;
 use transport::{Payload, Error, Result, UnaryCodec};
 
