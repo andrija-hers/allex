@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use futures::Stream;
-use crate::{Encodable, MethodCall, ModuleMethodCall, RelayedModuleMethodCall, UnaryCodec, types::{Payload, Result}};
+use crate::{Encodable, MethodCall, ModuleMethodCall, RelayedModuleMethodCall, UnaryCodec, transport_types::{Payload, Result}};
 use std::{sync::atomic::Ordering};
 
 

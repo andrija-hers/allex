@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
-use crate::types::*;
+use crate::transport_types::*;
 use crate::transport::{ServerSideOneShotTransport, ServerSideOneShotTransportItem};
 
 pub struct AxumTransport<C: UnaryCodec> {

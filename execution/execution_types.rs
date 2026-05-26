@@ -16,8 +16,3 @@ pub trait ModuleExecutor: Send + Sync {
 pub trait RelayedModuleExecutor: Send + Sync {
     async fn execute(&self, server: &str, module: &str, method: &str, payload: Payload) -> Result<Payload>;
 }
-
-mod registry;
-pub use registry::*;
-mod response;
-pub use response::*;

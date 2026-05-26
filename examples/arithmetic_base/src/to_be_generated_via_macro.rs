@@ -1,8 +1,48 @@
+use transport::{Error, UnaryCodec};
+use crate::{AddRequest, AddResult, MulRequest, MulResult};
+
+pub trait ArithmeticV1Client<C: UnaryCodec> {
+    fn add(&self, first: i32, second: i32) -> impl Future<Output = Result<AddResult, Error>> + Send;
+    fn mul(&self, first: i32, second: i32) -> impl Future<Output = Result<MulResult, Error>> + Send;
+}
+
+
+use transport::{ClientSideOneShotTransport};
+
+impl<T, C> ArithmeticV1Client<C> for T
+where
+    T: ClientSideOneShotTransport<C, AddRequest> + Sync
+        + ClientSideOneShotTransport<C, MulRequest>,
+    C: UnaryCodec, {
+    async fn add(&self, first: i32, second: i32) -> Result<AddResult, Error> {
+        let result = 
+        <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
+            self, 
+            "arithmetic_v1", 
+            "add", 
+            AddRequest{a: first, b: second})
+            .await?.
+            decode::<C, AddResult>()?;
+            Ok(result)
+    } 
+    async fn mul(&self, first: i32, second: i32) -> Result<MulResult, Error> {
+        let result = 
+        <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
+            self, 
+            "arithmetic_v1", 
+            "mul", 
+            AddRequest{a: first, b: second})
+            .await?.
+            decode::<C, MulResult>()?;
+            Ok(result)
+    }
+}
+
 use async_trait::async_trait;
-use transport::{Payload, UnaryCodec, Encodable, Error as TransportError};
+use transport::{Payload, Encodable, Error as TransportError};
 use execution::{MethodResponder, MethodResponderWithCodec, Response};
 
-use crate::{ArithmeticV1, AddRequest, MulRequest};
+use crate::{ArithmeticV1};
 
 pub struct ArithmeticV1MethodResponder<I, C> {
     inner: I,

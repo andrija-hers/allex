@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::transport_types::*;
 use crate::transport::OneShotTransport;
 
 pub struct HttpTransport {

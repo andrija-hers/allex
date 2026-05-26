@@ -1,11 +1,7 @@
-mod arithmetic_client;
-use arithmetic_client::*;
-mod arithmetic_one_shot_client;
+use arithmetic_base::*;
 mod arithmetic_server_impl;
 
 use transport::{Error, HttpTransport, JsonCodec};
-
-
 
 #[tokio::main]
 pub async fn main () -> Result<(), Error>{
