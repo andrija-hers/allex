@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "transport",
+    "progressable-future",
+    "execution",
     "examples/arithmetic_base",
     "examples/arithmetic_client"
-, "examples/arithmetic_server", "execution"]
+, "examples/arithmetic_server"]

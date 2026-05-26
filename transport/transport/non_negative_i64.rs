@@ -23,7 +23,7 @@ impl NonNegativeWrappingAtomicI64 {
 
         loop {
             let next = if current == i64::MAX {
-                0
+                1
             } else {
                 current + 1
             };
@@ -38,5 +38,21 @@ impl NonNegativeWrappingAtomicI64 {
                 Err(actual) => current = actual,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::NonNegativeWrappingAtomicI64;
+
+    #[test]
+    fn wraps_back_to_one_instead_of_zero() {
+        let counter = NonNegativeWrappingAtomicI64::new(i64::MAX);
+
+        assert_eq!(counter.fetch_inc_wrap(Ordering::Relaxed), i64::MAX);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.fetch_inc_wrap(Ordering::Relaxed), 1);
     }
 }

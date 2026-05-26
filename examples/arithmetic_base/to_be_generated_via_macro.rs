@@ -27,11 +27,11 @@ where
     } 
     async fn mul(&self, first: i32, second: i32) -> Result<MulResult, Error> {
         let result = 
-        <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
+        <T as ClientSideOneShotTransport<C, MulRequest>>::execute_module_method_call(
             self, 
             "arithmetic_v1", 
             "mul", 
-            AddRequest{a: first, b: second})
+            MulRequest{a: first, b: second})
             .await?.
             decode::<C, MulResult>()?;
             Ok(result)
@@ -110,4 +110,73 @@ where
     C: UnaryCodec + Send + Sync,
 {
     type Codec = C;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use transport::{ClientSideOneShotTransport, Encodable, Error, JsonCodec, Payload};
+
+    use crate::{AddRequest, ArithmeticV1Client, MulRequest, MulResult};
+
+    struct MockTransport {
+        add_calls: AtomicUsize,
+        mul_calls: AtomicUsize,
+    }
+
+    impl MockTransport {
+        fn new() -> Self {
+            Self {
+                add_calls: AtomicUsize::new(0),
+                mul_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ClientSideOneShotTransport<JsonCodec, AddRequest> for MockTransport {
+        fn execute_method_call(&self, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn execute_module_method_call(&self, _module: &str, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            self.add_calls.fetch_add(1, Ordering::Relaxed);
+            async move { MulResult { r: -1 }.encode::<JsonCodec>() }
+        }
+
+        fn execute_relayed_module_method_call(&self, _server: &str, _module: &str, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("unused in test") }
+        }
+    }
+
+    impl ClientSideOneShotTransport<JsonCodec, MulRequest> for MockTransport {
+        fn execute_method_call(&self, _method: &str, _payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn execute_module_method_call(&self, _module: &str, _method: &str, payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            self.mul_calls.fetch_add(1, Ordering::Relaxed);
+            async move { MulResult { r: payload.a * payload.b }.encode::<JsonCodec>() }
+        }
+
+        fn execute_relayed_module_method_call(&self, _server: &str, _module: &str, _method: &str, _payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("unused in test") }
+        }
+    }
+
+    #[tokio::test]
+    async fn mul_uses_mul_request_transport_impl() {
+        let transport = MockTransport::new();
+
+        let result = <MockTransport as ArithmeticV1Client<JsonCodec>>::mul(&transport, 3, 4)
+            .await
+            .expect("mul should succeed");
+
+        assert_eq!(result.r, 12);
+        assert_eq!(transport.add_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.mul_calls.load(Ordering::Relaxed), 1);
+    }
 }

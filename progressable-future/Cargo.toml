@@ -1,0 +1,20 @@
+[package]
+name = "progressable-future"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "ProgressableFuture: a future that emits progress updates before completing."
+
+# default uses std/tokio for ergonomics
+[features]
+default = ["std"]
+std = ["tokio", "futures"]
+alloc = [] # enabling `alloc` allows building for no_std + alloc
+
+[dependencies]
+# tokio & futures only enabled when `std` feature is on
+tokio = { version = "1", optional = true, features = ["full"] }
+futures = { version = "0.3", optional = true }
+
+# For no_std/alloc builds, rely on alloc crate from rust runtime
+# (no dependency needed, but we conditionally use `alloc` in code)

@@ -8,7 +8,7 @@ use std::{sync::atomic::Ordering};
 pub struct Frame (i64, Payload);
 
 use super::NonNegativeWrappingAtomicI64;
-static FRAMECOUNTER: NonNegativeWrappingAtomicI64 = NonNegativeWrappingAtomicI64::new(0);
+static FRAMECOUNTER: NonNegativeWrappingAtomicI64 = NonNegativeWrappingAtomicI64::new(1);
 impl Frame {
     pub fn new (payload: Payload) -> Self {
         Self(FRAMECOUNTER.fetch_inc_wrap(Ordering::Relaxed), payload)
@@ -73,5 +73,32 @@ impl<T: SerialTransport + Sync, C: UnaryCodec> ClientSideSerialTransport<C> for 
     }
     fn ask_for_relayed_module_method_execution(&self, call: RelayedModuleMethodCall) -> impl Future<Output = Result<i64>> + Send {
         <T as ClientSideSerialTransportInternal<C, RelayedModuleMethodCall>>::send_framed(self, call)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frame;
+    use crate::Payload;
+
+    #[test]
+    fn request_frames_use_positive_ids() {
+        for _ in 0..8 {
+            let frame = Frame::new(Payload::new(b"request"));
+
+            assert!(frame.is_request());
+            assert!(!frame.is_response());
+            assert!(frame.get_id() > 0);
+        }
+    }
+
+    #[test]
+    fn response_frames_negate_request_ids() {
+        let request = Frame::new(Payload::new(b"request"));
+        let response = Frame::response_to(&request, Payload::new(b"response"));
+
+        assert!(response.is_response());
+        assert!(!response.is_request());
+        assert_eq!(response.get_id(), -request.get_id());
     }
 }

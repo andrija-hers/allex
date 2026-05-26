@@ -61,8 +61,8 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
 use axum::{
     body::Bytes,
     extract::State,
-    http::StatusCode,
-    response::IntoResponse
+    http::{StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response}
 };
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
@@ -73,7 +73,12 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         // 1. Decode request body
         let payload = match C::decode::<Payload>(&body) {
             Ok(payload) => payload,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            Err(err) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Could not decode request payload: {err:?}"),
+                );
+            }
         };
 
         // 2. Create response channel
@@ -86,19 +91,35 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         };
 
         if tx.send(item).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Transport receiver is not available",
+            );
         }
 
         // 4. Wait for server-side logic to produce response
         let response_payload = match response_rx.await {
             Ok(payload) => payload,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Server-side handler dropped the response channel",
+                );
+            }
         };
 
         // 5. Encode response and return as HTTP body
         match C::encode(&response_payload) {
-            Ok(bytes) => bytes.get_bytes_forever().into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Ok(bytes) => (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "application/json")],
+                bytes.get_bytes_forever(),
+            )
+                .into_response(),
+            Err(err) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not encode response payload: {err:?}"),
+            ),
         }
     }
 }
@@ -111,4 +132,8 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             .route("/rpc", post(Self::handle_post))
             .with_state(self.tx.clone())
     }
+}
+
+fn error_response(status: StatusCode, message: &str) -> Response {
+    (status, message.to_string()).into_response()
 }
