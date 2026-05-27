@@ -1,4 +1,4 @@
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use futures::stream::{self, Stream, StreamExt};
 
 /// Steps emitted by the future
@@ -21,10 +21,10 @@ pub enum Step<P, T, E> {
 /// Sender for progress events
 #[derive(Clone)]
 pub struct ProgressSender<P> {
-    tx: broadcast::Sender<P>,
+    tx: mpsc::UnboundedSender<P>,
 }
 
-impl<P: Clone> ProgressSender<P> {
+impl<P> ProgressSender<P> {
     ///Send the Progress
     pub fn progress(&self, value: P) {
         let _ = self.tx.send(value);
@@ -33,19 +33,19 @@ impl<P: Clone> ProgressSender<P> {
 
 /// A Future that can emit progress updates
 pub struct ProgressableFuture<P, T, E> {
-    progress_tx: broadcast::Sender<P>,
+    progress_rx: Mutex<Option<mpsc::UnboundedReceiver<P>>>,
     result_rx: Mutex<Option<oneshot::Receiver<Result<T, E>>>>,
 }
 
-impl<P: Clone + Send + 'static, T: Send + 'static, E: Send + 'static> ProgressableFuture<P, T, E> {
+impl<P: Send + 'static, T: Send + 'static, E: Send + 'static> ProgressableFuture<P, T, E> {
     /// Create a new `ProgressableFuture`
     pub fn new<Fut, F>(operation: F) -> Self
     where
         F: FnOnce(ProgressSender<P>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T, E>> + Send + 'static,
     {
-        let (progress_tx, _) = broadcast::channel(32);
-        let sender = ProgressSender { tx: progress_tx.clone() };
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let sender = ProgressSender { tx: progress_tx };
         let (result_tx, result_rx) = oneshot::channel();
 
         tokio::spawn(async move {
@@ -54,20 +54,19 @@ impl<P: Clone + Send + 'static, T: Send + 'static, E: Send + 'static> Progressab
         });
 
         Self {
-            progress_tx,
+            progress_rx: Mutex::new(Some(progress_rx)),
             result_rx: Mutex::new(Some(result_rx)),
         }
     }
 
     /// Convert into a Stream of `Step<P, T, E>`
     pub fn stream(self) -> impl Stream<Item = Step<P, T, E>> {
-        let progress_rx = self.progress_tx.subscribe();
-        let progress_stream = stream::unfold(progress_rx, |mut rx| async move {
-            match rx.recv().await {
-                Ok(p) => Some((Step::Progress(p), rx)),
-                Err(broadcast::error::RecvError::Closed) => None,
-                Err(broadcast::error::RecvError::Lagged(_)) => Some((Step::MissedSome, rx)), // optional
-            }
+        // Extract the receiver out of the Mutex up front — stream() consumes self,
+        // so we can synchronously take ownership without holding the lock across yields.
+        let progress_rx: Option<_> = self.progress_rx.into_inner();
+        let progress_stream = stream::unfold(progress_rx, |mut rx_opt| async move {
+            let rx = rx_opt.as_mut()?;
+            rx.recv().await.map(|progress| (Step::Progress(progress), rx_opt))
         });
 
         let result_rx = self.result_rx;
@@ -95,10 +94,10 @@ impl<P: Clone + Send + 'static, T: Send + 'static, E: Send + 'static> Progressab
             match rx.await {
                 Ok(Ok(val)) => Ok(val),
                 Ok(Err(e)) => Err(Some(e)),
-                Err(_) => Err(None), // canceled
+                Err(_) => Err(None),
             }
         } else {
-            Err(None) // dropped
+            Err(None)
         }
     }
 }

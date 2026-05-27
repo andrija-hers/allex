@@ -1,6 +1,9 @@
 use crate::transport_types::*;
 use crate::transport::OneShotTransport;
+use futures::{Stream, StreamExt};
 use reqwest::StatusCode;
+use serde::Serialize;
+use std::{future::Future, pin::Pin};
 
 pub struct HttpTransport {
     base_url: String,
@@ -9,6 +12,56 @@ pub struct HttpTransport {
 impl HttpTransport {
     pub fn new(base_url: &str) -> Self {
         Self{base_url: format!("{}/rpc", base_url)}
+    }
+}
+
+pub type CallResponseStream = Pin<Box<dyn Stream<Item = Result<CallResponse>> + Send>>;
+
+pub trait ChunkedTransport {
+    fn send_payload_stream<C: UnaryCodec + Send + 'static>(
+        &self,
+        payload: Payload,
+    ) -> impl Future<Output = Result<CallResponseStream>> + Send;
+}
+
+trait ClientSideChunkedTransportInternal<C: UnaryCodec, S: Serialize> {
+    fn send_encoded_stream(&self, thingy: Result<S>) -> impl Future<Output = Result<CallResponseStream>> + Send;
+}
+
+impl<T: ChunkedTransport + Sync, C: UnaryCodec + Send + 'static, S: Serialize + Send> ClientSideChunkedTransportInternal<C, S> for T {
+    fn send_encoded_stream(
+        &self,
+        thingy: Result<S>,
+    ) -> impl Future<Output = Result<CallResponseStream>> + Send {
+        async move {
+            match thingy {
+                Ok(encoded_thingy) => match encoded_thingy.encode::<C>() {
+                    Ok(encoded) => self.send_payload_stream::<C>(encoded).await,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+pub trait ClientSideChunkedTransport<C: UnaryCodec, P: Serialize> {
+    fn execute_method_call_stream(&self, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send;
+    fn execute_module_method_call_stream(&self, module: &str, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send;
+    fn execute_relayed_module_method_call_stream(&self, server: &str, module: &str, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send;
+}
+
+impl<T: ChunkedTransport + Sync, C: UnaryCodec + Send + 'static, P: Serialize + Send> ClientSideChunkedTransport<C, P> for T {
+    fn execute_method_call_stream(&self, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send {
+        <T as ClientSideChunkedTransportInternal<C, MethodCall>>::send_encoded_stream(self, MethodCall::new::<C, P>(method, payload))
+    }
+
+    fn execute_module_method_call_stream(&self, module: &str, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send {
+        <T as ClientSideChunkedTransportInternal<C, ModuleMethodCall>>::send_encoded_stream(self, ModuleMethodCall::new::<C, P>(module, method, payload))
+    }
+
+    fn execute_relayed_module_method_call_stream(&self, server: &str, module: &str, method: &str, payload: P) -> impl Future<Output = Result<CallResponseStream>> + Send {
+        <T as ClientSideChunkedTransportInternal<C, RelayedModuleMethodCall>>::send_encoded_stream(self, RelayedModuleMethodCall::new::<C, P>(server, module, method, payload))
     }
 }
 
@@ -47,6 +100,62 @@ impl OneShotTransport for HttpTransport {
     }
 }
 
+impl ChunkedTransport for HttpTransport {
+    fn send_payload_stream<C: UnaryCodec + Send + 'static>(
+        &self,
+        payload: Payload,
+    ) -> impl Future<Output = Result<CallResponseStream>> + Send {
+        let url = self.base_url.clone();
+
+        async move {
+            let client = reqwest::Client::new();
+
+            let response = client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| Error::SendRequest(format!("Could not send {} bytes to {}: {}", payload.len(), url, e)))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::ReceiveResponse(format!("Could not receive from {}: {}", url, e)))?;
+                return Err(http_status_error(&url, status, &body));
+            }
+
+            let url_for_stream = url.clone();
+            let stream = async_stream::try_stream! {
+                let mut buffered = Vec::new();
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk) = byte_stream.next().await {
+                    let chunk = chunk.map_err(|e| Error::ReceiveResponse(format!("Could not receive from {}: {}", url_for_stream, e)))?;
+                    buffered.extend_from_slice(&chunk);
+
+                    while let Some(position) = buffered.iter().position(|byte| *byte == b'\n') {
+                        let line = buffered.drain(..=position).collect::<Vec<_>>();
+                        let line = &line[..line.len().saturating_sub(1)];
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        yield decode_call_response::<C>(&url_for_stream, line)?;
+                    }
+                }
+
+                if !buffered.is_empty() {
+                    yield decode_call_response::<C>(&url_for_stream, &buffered)?;
+                }
+            };
+
+            Ok(Box::pin(stream) as CallResponseStream)
+        }
+    }
+}
+
 fn http_status_error(url: &str, status: StatusCode, body: &[u8]) -> Error {
     let body = String::from_utf8_lossy(body);
     Error::ReceiveResponse(format!(
@@ -57,13 +166,21 @@ fn http_status_error(url: &str, status: StatusCode, body: &[u8]) -> Error {
     ))
 }
 
+fn decode_call_response<C: UnaryCodec>(url: &str, bytes: &[u8]) -> Result<CallResponse> {
+    C::decode::<CallResponse>(bytes)
+        .map_err(|e| Error::ReceiveResponse(format!("Could not decode streamed payload from {}: {:?}", url, e)))
+}
+
 #[cfg(test)]
 mod tests {
-    use axum::{Router, http::StatusCode, routing::post};
+    use std::convert::Infallible;
+
+    use axum::{Router, body::{Body, Bytes}, http::StatusCode, routing::post};
+    use futures::{stream, StreamExt};
     use tokio::net::TcpListener;
 
     use super::HttpTransport;
-    use crate::{Error, OneShotTransport, Payload};
+    use crate::{CallResponse, ChunkedTransport, Error, JsonCodec, OneShotTransport, Payload, UnaryCodec};
 
     #[tokio::test]
     async fn reports_http_error_status_and_body() {
@@ -93,5 +210,70 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_call_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = vec![
+            encode_frame(CallResponse::Progress(Payload::new(br#"{"currently_at":3}"#))),
+            encode_frame(CallResponse::Success(Payload::new(br#"{"total":4}"#))),
+        ];
+        let app = Router::new().route(
+            "/rpc",
+            post(move || {
+                let frames = frames.clone();
+                async move {
+                    (
+                        [("content-type", "application/x-ndjson")],
+                        Body::from_stream(stream::iter(
+                            frames
+                                .into_iter()
+                                .map(|frame| Ok::<Bytes, Infallible>(Bytes::from(frame))),
+                        )),
+                    )
+                }
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpTransport::new(&format!("http://{}", address));
+        let mut response_stream = <HttpTransport as ChunkedTransport>::send_payload_stream::<JsonCodec>(
+            &transport,
+            Payload::new(b"ping"),
+        )
+        .await
+        .expect("request should succeed");
+
+        let first = response_stream.next().await.expect("progress frame").expect("valid progress frame");
+        let second = response_stream.next().await.expect("success frame").expect("valid success frame");
+
+        server.abort();
+
+        match first {
+            CallResponse::Progress(payload) => {
+                assert_eq!(payload.get_bytes(), br#"{"currently_at":3}"#);
+            }
+            other => panic!("unexpected first frame: {other:?}"),
+        }
+
+        match second {
+            CallResponse::Success(payload) => {
+                assert_eq!(payload.get_bytes(), br#"{"total":4}"#);
+            }
+            other => panic!("unexpected second frame: {other:?}"),
+        }
+    }
+
+    fn encode_frame(frame: CallResponse) -> Vec<u8> {
+        let mut bytes = JsonCodec::encode(&frame)
+            .expect("frame should encode")
+            .get_bytes_forever();
+        bytes.push(b'\n');
+        bytes
     }
 }

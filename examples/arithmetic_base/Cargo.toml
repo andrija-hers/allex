@@ -17,3 +17,4 @@ tokio-stream = "0.1"
 axum = "0.8"
 transport = { path = "../../transport" }
 execution = { path = "../../execution" }
+progressable-future = { path = "../../progressable-future" }

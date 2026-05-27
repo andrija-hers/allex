@@ -1,8 +1,16 @@
-use std::marker::PhantomData;
+use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin};
+
+use futures::{Stream, StreamExt};
+use axum::body::{Body, Bytes};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
 use crate::transport_types::*;
 use crate::transport::{ServerSideOneShotTransport, ServerSideOneShotTransportItem};
+use axum::{
+    extract::State,
+    http::{StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response}
+};
+use tokio_stream::wrappers::ReceiverStream;
 
 pub struct AxumTransport<C: UnaryCodec> {
     rx: tokio::sync::Mutex<Option<mpsc::Receiver<AxumOneShotItem>>>,
@@ -24,7 +32,7 @@ impl<C: UnaryCodec> AxumTransport<C> {
 
 pub struct AxumOneShotItem {
     payload: Payload,
-    response: tokio::sync::oneshot::Sender<Payload>,
+    response: tokio::sync::oneshot::Sender<AxumResponse>,
 }
 
 impl ServerSideOneShotTransportItem for AxumOneShotItem {
@@ -37,8 +45,27 @@ impl ServerSideOneShotTransportItem for AxumOneShotItem {
         payload: Payload,
     ) -> Result<()> {
         self.response
-            .send(payload)
-            .map_err(|e| Error::SendRequest(format!("Could not send {} bytes, the caller dropped", e.len())))
+            .send(AxumResponse::Unary(payload))
+            .map_err(|e| Error::SendRequest(format!("Could not send response, the caller dropped")))
+    }
+}
+
+pub trait ServerSideChunkedTransportItem {
+    fn respond_with_stream<S>(self, stream: S) -> impl Future<Output = Result<()>> + Send
+    where
+        S: Stream<Item = CallResponse> + Send + 'static;
+}
+
+impl ServerSideChunkedTransportItem for AxumOneShotItem {
+    fn respond_with_stream<S>(self, stream: S) -> impl Future<Output = Result<()>> + Send
+    where
+        S: Stream<Item = CallResponse> + Send + 'static,
+    {
+        async move {
+            self.response
+                .send(AxumResponse::Stream(Box::pin(stream)))
+                .map_err(|_| Error::SendRequest("Could not send streamed response, the caller dropped".to_string()))
+        }
     }
 }
 
@@ -57,19 +84,16 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
     }
 }
 
-
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::{StatusCode, header::CONTENT_TYPE},
-    response::{IntoResponse, Response}
-};
+enum AxumResponse {
+    Unary(Payload),
+    Stream(Pin<Box<dyn Stream<Item = CallResponse> + Send>>),
+}
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     pub async fn handle_post(
         State(tx): State<mpsc::Sender<AxumOneShotItem>>,
         body: Bytes,
-    ) -> impl IntoResponse {
+    ) -> Response {
         // 1. Decode request body
         let payload = match C::decode::<Payload>(&body) {
             Ok(payload) => payload,
@@ -98,7 +122,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         }
 
         // 4. Wait for server-side logic to produce response
-        let response_payload = match response_rx.await {
+        let response = match response_rx.await {
             Ok(payload) => payload,
             Err(_) => {
                 return error_response(
@@ -109,17 +133,29 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         };
 
         // 5. Encode response and return as HTTP body
-        match C::encode(&response_payload) {
-            Ok(bytes) => (
+        match response {
+            AxumResponse::Unary(response_payload) => match C::encode(&response_payload) {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "application/json")],
+                    bytes.get_bytes_forever(),
+                )
+                    .into_response(),
+                Err(err) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Could not encode response payload: {err:?}"),
+                ),
+            },
+            AxumResponse::Stream(stream) => (
                 StatusCode::OK,
-                [(CONTENT_TYPE, "application/json")],
-                bytes.get_bytes_forever(),
+                [(CONTENT_TYPE, "application/x-ndjson")],
+                Body::from_stream(stream.filter_map(|response| async move {
+                    encode_call_response::<C>(&response)
+                        .ok()
+                        .map(|bytes| Ok::<Bytes, Infallible>(bytes))
+                })),
             )
                 .into_response(),
-            Err(err) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Could not encode response payload: {err:?}"),
-            ),
         }
     }
 }
@@ -136,4 +172,10 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
 
 fn error_response(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
+}
+
+fn encode_call_response<C: UnaryCodec>(response: &CallResponse) -> Result<Bytes> {
+    let mut bytes = C::encode(response)?.get_bytes_forever();
+    bytes.push(b'\n');
+    Ok(Bytes::from(bytes))
 }
