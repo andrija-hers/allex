@@ -1,4 +1,4 @@
-use progressable_future::{ProgressableFuture, Step};
+use progressable_future::{ProgressOutcome, ProgressableFuture, Step, TransportIssue};
 use tokio::time::{sleep, Duration};
 use futures::stream::StreamExt;
 use futures::pin_mut;
@@ -23,9 +23,8 @@ async fn main() {
             Step::Progress(p) => println!("Progress: {}%", p),
             Step::Success(val) => println!("✅ Success: {val}"),
             Step::Error(e) => eprintln!("❌ Error: {e}"),
-            Step::MissedSome => eprintln!("⚠️ Missed some updates"),
-            Step::Canceled => eprintln!("⚠️ Task canceled"),
-            Step::Dropped => eprintln!("⚠️ Future dropped"),
+            Step::Transport(TransportIssue::Error(err)) => eprintln!("⚠️ Transport error: {err}"),
+            Step::Transport(TransportIssue::Interrupted) => eprintln!("⚠️ Task interrupted"),
         }
     }
 
@@ -40,8 +39,13 @@ async fn main() {
     });
 
     match fut2.await_result().await {
-        Ok(val) => println!("✅ Done with await_result: {val}"),
-        Err(Some(e)) => eprintln!("❌ Error with await_result: {e}"),
-        Err(None) => eprintln!("⚠️ Task canceled or future dropped"),
+        ProgressOutcome::Success(val) => println!("✅ Done with await_result: {val}"),
+        ProgressOutcome::Error(e) => eprintln!("❌ Error with await_result: {e}"),
+        ProgressOutcome::Transport(TransportIssue::Error(err)) => {
+            eprintln!("⚠️ Transport error with await_result: {err}")
+        }
+        ProgressOutcome::Transport(TransportIssue::Interrupted) => {
+            eprintln!("⚠️ Task interrupted")
+        }
     }
 }

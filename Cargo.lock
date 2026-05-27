@@ -1428,6 +1428,7 @@ dependencies = [
  "async-stream",
  "axum",
  "futures",
+ "progressable-future",
  "reqwest",
  "serde",
  "serde_json",

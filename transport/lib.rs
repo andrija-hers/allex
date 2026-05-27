@@ -1,3 +1,4 @@
+pub use progressable_future::{ProgressOutcome, TransportIssue};
 mod transport_types;
 pub use transport_types::*;
 mod transport;

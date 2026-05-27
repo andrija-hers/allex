@@ -1,5 +1,5 @@
 //! ProgressableFuture: a Future that emits progress updates with progress events.
-//! 
+//!
 //! Supports std (tokio + futures) and no_std + alloc environments.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -13,13 +13,13 @@ extern crate alloc;
 mod imp_std;
 
 #[cfg(feature = "std")]
-pub use imp_std::{ProgressableFuture, ProgressSender, Step};
+pub use imp_std::{ProgressOutcome, ProgressSender, ProgressableFuture, Step, TransportIssue};
 
 #[cfg(not(feature = "std"))]
 mod imp_alloc;
 
 #[cfg(not(feature = "std"))]
-pub use imp_alloc::{ProgressableFuture, ProgressSender, Step};
+pub use imp_alloc::{ProgressOutcome, ProgressableFuture, Step, TransportIssue};
 
 //
 // Note: we publish two implementations:

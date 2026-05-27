@@ -2,13 +2,13 @@ use std::{future::Future, pin::Pin};
 
 use futures::{Stream, StreamExt};
 use progressable_future::{ProgressableFuture, Step};
-use transport::{CallResponse, ClientSideChunkedTransport, Encodable, Error, Payload, UnaryCodec};
+use transport::{CallResponse, ClientSideChunkedTransport, Encodable, Error, Payload, ProgressOutcome, TransportIssue, UnaryCodec};
 use crate::{AddRequest, AddResult, ArithmeticError, CountRequest, CountStep, MulRequest, MulResult, StepsMade};
 
 pub trait ArithmeticV1Client<C: UnaryCodec> {
-    fn add(&self, first: i32, second: i32) -> impl Future<Output = Result<AddResult, Error>> + Send;
-    fn mul(&self, first: i32, second: i32) -> impl Future<Output = Result<MulResult, Error>> + Send;
-    fn count(&self, from: i32, to: i32) -> impl Future<Output = Result<ProgressableFuture<CountStep, StepsMade, ArithmeticError>, Error>> + Send;
+    fn add(&self, first: i32, second: i32) -> impl Future<Output = ProgressOutcome<AddResult, ArithmeticError, Error>> + Send;
+    fn mul(&self, first: i32, second: i32) -> impl Future<Output = ProgressOutcome<MulResult, ArithmeticError, Error>> + Send;
+    fn count(&self, from: i32, to: i32) -> impl Future<Output = Result<ProgressableFuture<CountStep, StepsMade, ArithmeticError, Error>, Error>> + Send;
 }
 
 
@@ -20,30 +20,30 @@ where
         + ClientSideOneShotTransport<C, MulRequest>
         + ClientSideChunkedTransport<C, CountRequest>,
     C: UnaryCodec + Send + Sync + 'static, {
-    async fn add(&self, first: i32, second: i32) -> Result<AddResult, Error> {
-        let result = 
-        <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
-            self, 
-            "arithmetic_v1", 
-            "add", 
-            AddRequest{a: first, b: second})
-            .await?.
-            decode::<C, AddResult>()?;
-            Ok(result)
-    } 
-    async fn mul(&self, first: i32, second: i32) -> Result<MulResult, Error> {
-        let result = 
-        <T as ClientSideOneShotTransport<C, MulRequest>>::execute_module_method_call(
-            self, 
-            "arithmetic_v1", 
-            "mul", 
-            MulRequest{a: first, b: second})
-            .await?.
-            decode::<C, MulResult>()?;
-            Ok(result)
+    async fn add(&self, first: i32, second: i32) -> ProgressOutcome<AddResult, ArithmeticError, Error> {
+        decode_one_shot_outcome::<C, AddResult, ArithmeticError>(
+            <T as ClientSideOneShotTransport<C, AddRequest>>::execute_module_method_call(
+                self,
+                "arithmetic_v1",
+                "add",
+                AddRequest { a: first, b: second },
+            )
+            .await,
+        )
+    }
+    async fn mul(&self, first: i32, second: i32) -> ProgressOutcome<MulResult, ArithmeticError, Error> {
+        decode_one_shot_outcome::<C, MulResult, ArithmeticError>(
+            <T as ClientSideOneShotTransport<C, MulRequest>>::execute_module_method_call(
+                self,
+                "arithmetic_v1",
+                "mul",
+                MulRequest { a: first, b: second },
+            )
+            .await,
+        )
     }
 
-    async fn count(&self, from: i32, to: i32) -> Result<ProgressableFuture<CountStep, StepsMade, ArithmeticError>, Error> {
+    async fn count(&self, from: i32, to: i32) -> Result<ProgressableFuture<CountStep, StepsMade, ArithmeticError, Error>, Error> {
         let response_stream =
             <T as ClientSideChunkedTransport<C, CountRequest>>::execute_module_method_call_stream(
                 self,
@@ -53,31 +53,37 @@ where
             )
             .await?;
 
-        Ok(ProgressableFuture::new(move |sender| async move {
+        Ok(ProgressableFuture::new_with_transport(move |sender| async move {
             let mut response_stream = response_stream;
 
             while let Some(frame) = response_stream.next().await {
-                match frame.map_err(transport_error_to_arithmetic)? {
-                    CallResponse::Progress(payload) => {
-                        let progress = payload
-                            .decode::<C, CountStep>()
-                            .map_err(transport_error_to_arithmetic)?;
+                match frame {
+                    Err(error) => {
+                        return ProgressOutcome::Transport(TransportIssue::Error(error));
+                    }
+                    Ok(CallResponse::Progress(payload)) => {
+                        let progress = match payload.decode::<C, CountStep>() {
+                            Ok(progress) => progress,
+                            Err(error) => return ProgressOutcome::Transport(TransportIssue::Error(error)),
+                        };
                         sender.progress(progress);
                     }
-                    CallResponse::Success(payload) => {
-                        return payload
-                            .decode::<C, StepsMade>()
-                            .map_err(transport_error_to_arithmetic);
+                    Ok(CallResponse::Success(payload)) => {
+                        return match payload.decode::<C, StepsMade>() {
+                            Ok(result) => ProgressOutcome::Success(result),
+                            Err(error) => ProgressOutcome::Transport(TransportIssue::Error(error)),
+                        };
                     }
-                    CallResponse::Error(payload) => {
-                        return Err(payload
-                            .decode::<C, ArithmeticError>()
-                            .map_err(transport_error_to_arithmetic)?);
+                    Ok(CallResponse::Error(payload)) => {
+                        return match payload.decode::<C, ArithmeticError>() {
+                            Ok(error) => ProgressOutcome::Error(error),
+                            Err(error) => ProgressOutcome::Transport(TransportIssue::Error(error)),
+                        };
                     }
                 }
             }
 
-            Err(ArithmeticError::Interrupted)
+            ProgressOutcome::Transport(TransportIssue::Interrupted)
         }))
     }
 }
@@ -123,7 +129,7 @@ where
                     Step::Progress(progress) => CallResponse::Progress(encode_payload::<C, _>(&progress)),
                     Step::Success(result) => CallResponse::Success(encode_payload::<C, _>(&result)),
                     Step::Error(err) => CallResponse::Error(encode_payload::<C, _>(&err)),
-                    Step::MissedSome | Step::Canceled | Step::Dropped => {
+                    Step::Transport(_) => {
                         CallResponse::Error(encode_payload::<C, _>(&ArithmeticError::Interrupted))
                     }
                 })))
@@ -197,7 +203,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use transport::{CallResponse, CallResponseStream, ClientSideOneShotTransport, ClientSideChunkedTransport, Encodable, Error, JsonCodec, Payload};
+    use transport::{CallResponse, CallResponseStream, ClientSideChunkedTransport, ClientSideOneShotTransport, Encodable, Error, JsonCodec, Payload, ProgressOutcome, TransportIssue};
 
     use crate::{AddRequest, ArithmeticV1Client, CountRequest, CountStep, MulRequest, MulResult, StepsMade};
 
@@ -276,10 +282,12 @@ mod tests {
     async fn mul_uses_mul_request_transport_impl() {
         let transport = MockTransport::new();
 
-        let result = <MockTransport as ArithmeticV1Client<JsonCodec>>::mul(&transport, 3, 4)
-            .await
-            .expect("mul should succeed");
+        let outcome = <MockTransport as ArithmeticV1Client<JsonCodec>>::mul(&transport, 3, 4)
+            .await;
 
+        let ProgressOutcome::Success(result) = outcome else {
+            panic!("mul should succeed");
+        };
         assert_eq!(result.r, 12);
         assert_eq!(transport.add_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.mul_calls.load(Ordering::Relaxed), 1);
@@ -295,18 +303,222 @@ mod tests {
 
         let steps = progressable_future
             .await_result()
-            .await
-            .expect("count should finish");
+            .await;
+
+        let ProgressOutcome::Success(steps) = steps else {
+            panic!("count should finish successfully");
+        };
 
         assert_eq!(steps.total, 3);
         assert_eq!(transport.add_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.mul_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.count_calls.load(Ordering::Relaxed), 1);
     }
+
+    #[tokio::test]
+    async fn count_surfaces_transport_errors_separately() {
+        struct FailingTransport;
+
+        impl ClientSideOneShotTransport<JsonCodec, AddRequest> for FailingTransport {
+            fn execute_method_call(&self, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+
+            fn execute_module_method_call(&self, _module: &str, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+
+            fn execute_relayed_module_method_call(&self, _server: &str, _module: &str, _method: &str, _payload: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+        }
+
+        impl ClientSideOneShotTransport<JsonCodec, MulRequest> for FailingTransport {
+            fn execute_method_call(&self, _method: &str, _payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+
+            fn execute_module_method_call(&self, _module: &str, _method: &str, _payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+
+            fn execute_relayed_module_method_call(&self, _server: &str, _module: &str, _method: &str, _payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+        }
+
+        impl ClientSideChunkedTransport<JsonCodec, CountRequest> for FailingTransport {
+            fn execute_method_call_stream(&self, _method: &str, _payload: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+
+            fn execute_module_method_call_stream(&self, _module: &str, _method: &str, _payload: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send {
+                async move {
+                    Ok(Box::pin(futures::stream::iter(vec![
+                        Err(Error::ReceiveResponse("stream failed".to_string())),
+                    ])) as CallResponseStream)
+                }
+            }
+
+            fn execute_relayed_module_method_call_stream(&self, _server: &str, _module: &str, _method: &str, _payload: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send {
+                async { unreachable!("unused in test") }
+            }
+        }
+
+        let outcome = <FailingTransport as ArithmeticV1Client<JsonCodec>>::count(&FailingTransport, 2, 4)
+            .await
+            .expect("count should start")
+            .await_result()
+            .await;
+
+        match outcome {
+            ProgressOutcome::Transport(TransportIssue::Error(Error::ReceiveResponse(message))) => {
+                assert!(message.contains("stream failed"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    // A transport that returns:
+    //   mul(a, b) = Ok(a * b)        for even `a`
+    //   mul(a, b) = App error        for odd `a`
+    //   mul(a, b) = transport error  when a == 99
+    struct BatchTransport;
+
+    impl ClientSideOneShotTransport<JsonCodec, AddRequest> for BatchTransport {
+        fn execute_method_call(&self, _: &str, _: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send { async { unreachable!() } }
+        fn execute_module_method_call(&self, _: &str, _: &str, _: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send { async { unreachable!() } }
+        fn execute_relayed_module_method_call(&self, _: &str, _: &str, _: &str, _: AddRequest) -> impl Future<Output = Result<Payload, Error>> + Send { async { unreachable!() } }
+    }
+
+    impl ClientSideOneShotTransport<JsonCodec, MulRequest> for BatchTransport {
+        fn execute_method_call(&self, _: &str, _: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send { async { unreachable!() } }
+
+        fn execute_module_method_call(&self, _: &str, _: &str, payload: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async move {
+                if payload.a == 99 {
+                    return Err(Error::ReceiveResponse("network down".to_string()));
+                }
+                if payload.a % 2 != 0 {
+                    use crate::ArithmeticError;
+                    return Err(Error::App(ArithmeticError::Overflow.encode::<JsonCodec>()?));
+                }
+                MulResult { r: payload.a * payload.b }.encode::<JsonCodec>()
+            }
+        }
+
+        fn execute_relayed_module_method_call(&self, _: &str, _: &str, _: &str, _: MulRequest) -> impl Future<Output = Result<Payload, Error>> + Send { async { unreachable!() } }
+    }
+
+    impl ClientSideChunkedTransport<JsonCodec, CountRequest> for BatchTransport {
+        fn execute_method_call_stream(&self, _: &str, _: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send { async { unreachable!() } }
+        fn execute_module_method_call_stream(&self, _: &str, _: &str, payload: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send {
+            async move {
+                let frames = (payload.from..=payload.to).map(|i| {
+                    Ok(CallResponse::Progress(CountStep { currently_at: i }.encode::<JsonCodec>().unwrap()))
+                }).chain(std::iter::once(
+                    Ok(CallResponse::Success(StepsMade { total: payload.to - payload.from + 1 }.encode::<JsonCodec>().unwrap()))
+                )).collect::<Vec<_>>();
+                Ok(Box::pin(futures::stream::iter(frames)) as CallResponseStream)
+            }
+        }
+        fn execute_relayed_module_method_call_stream(&self, _: &str, _: &str, _: &str, _: CountRequest) -> impl Future<Output = Result<CallResponseStream, Error>> + Send { async { unreachable!() } }
+    }
+
+    /// Batch loop: continue on app error, break on transport issue.
+    /// Demonstrates that match arms control the embedding loop directly.
+    #[tokio::test]
+    async fn batch_loop_continues_on_app_error_breaks_on_transport() {
+        use crate::ArithmeticError;
+
+        let transport = BatchTransport;
+        let inputs = [2_i32, 3, 4, 99, 6]; // 3 → app error, 99 → transport, 6 never reached
+        let mut successes = vec![];
+        let mut app_errors = 0_usize;
+        let mut stopped_at: Option<i32> = None;
+
+        'batch: for a in inputs {
+            match <BatchTransport as ArithmeticV1Client<JsonCodec>>::mul(&transport, a, 10).await {
+                ProgressOutcome::Success(r) => {
+                    successes.push(r.r);
+                }
+                ProgressOutcome::Error(ArithmeticError::Overflow) => {
+                    app_errors += 1;
+                    continue 'batch; // skip this input, keep going
+                }
+                ProgressOutcome::Error(_) | ProgressOutcome::Transport(_) => {
+                    stopped_at = Some(a);
+                    break 'batch; // unrecoverable — abort the whole batch
+                }
+            }
+        }
+
+        assert_eq!(successes, vec![20, 40]);   // 2*10 and 4*10 succeeded
+        assert_eq!(app_errors, 1);             // 3 caused Overflow
+        assert_eq!(stopped_at, Some(99));      // transport error on 99 stopped the loop
+    }
+
+    /// Progressive stream: break early when a terminal step is received.
+    /// The while-let loop ends naturally on Success/Error/Transport, and
+    /// the caller can also break early from within Progress.
+    #[tokio::test]
+    async fn stream_loop_collects_progress_then_breaks_on_success() {
+        use futures::{StreamExt, pin_mut};
+        use progressable_future::Step;
+
+        let transport = BatchTransport;
+        let fut = <BatchTransport as ArithmeticV1Client<JsonCodec>>::count(&transport, 1, 5)
+            .await
+            .expect("count should start");
+
+        let stream = fut.stream();
+        pin_mut!(stream);
+
+        let mut progress_values = vec![];
+        let mut final_total: Option<i32> = None;
+
+        while let Some(step) = stream.next().await {
+            match step {
+                Step::Progress(p) => {
+                    progress_values.push(p.currently_at);
+                    // could break here to stop early — the stream is just an iterator
+                }
+                Step::Success(r) => {
+                    final_total = Some(r.total);
+                    break; // explicit break, though stream ends naturally after Success
+                }
+                Step::Error(e) => {
+                    panic!("unexpected error: {e:?}");
+                }
+                Step::Transport(t) => {
+                    panic!("unexpected transport issue: {t:?}");
+                }
+            }
+        }
+
+        assert_eq!(progress_values, vec![1, 2, 3, 4, 5]);
+        assert_eq!(final_total, Some(5));
+    }
+
 }
 
-fn transport_error_to_arithmetic(error: Error) -> ArithmeticError {
-    ArithmeticError::Transport(format!("{error:?}"))
+fn decode_one_shot_outcome<C, T, E>(result: Result<Payload, Error>) -> ProgressOutcome<T, E, Error>
+where
+    C: UnaryCodec,
+    T: serde::de::DeserializeOwned,
+    E: serde::de::DeserializeOwned,
+{
+    match result {
+        Ok(payload) => match payload.decode::<C, T>() {
+            Ok(value) => ProgressOutcome::Success(value),
+            Err(error) => ProgressOutcome::Transport(TransportIssue::Error(error)),
+        },
+        Err(Error::App(payload)) => match payload.decode::<C, E>() {
+            Ok(error) => ProgressOutcome::Error(error),
+            Err(decode_error) => ProgressOutcome::Transport(TransportIssue::Error(decode_error)),
+        },
+        Err(error) => ProgressOutcome::Transport(TransportIssue::Error(error)),
+    }
 }
 
 fn encode_payload<C, T>(value: &T) -> Payload
