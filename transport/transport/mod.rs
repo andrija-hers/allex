@@ -5,6 +5,8 @@ mod one_shot;
 pub use one_shot::*;
 mod serial;
 pub use serial::*;
+mod websocket;
+pub use websocket::*;
 mod reqwest;
 pub use reqwest::*;
 mod axum;

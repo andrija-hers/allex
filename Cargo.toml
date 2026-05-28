@@ -5,5 +5,6 @@ members = [
     "progressable-future",
     "execution",
     "examples/arithmetic_base",
-    "examples/arithmetic_client"
-, "examples/arithmetic_server"]
+    "examples/arithmetic_client",
+    "examples/arithmetic_server",
+    "examples/arithmetic_tests"]

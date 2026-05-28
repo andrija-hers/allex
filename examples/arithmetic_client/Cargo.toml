@@ -19,3 +19,7 @@ axum = "0.8"
 transport = {path = "../../transport"}
 arithmetic-base = {path = "../arithmetic_base"}
 progressable-future = { path = "../../progressable-future" }
+
+[[bin]]
+name = "arithmetic-websocket-client"
+path = "./websocket_main.rs"

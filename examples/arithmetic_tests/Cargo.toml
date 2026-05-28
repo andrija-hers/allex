@@ -1,0 +1,14 @@
+[package]
+name = "arithmetic-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+tokio       = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "net"] }
+futures     = "0.3"
+axum        = "0.8"
+tokio-stream = "0.1"
+transport        = { path = "../../transport" }
+execution        = { path = "../../execution" }
+arithmetic-base  = { path = "../arithmetic_base" }
+progressable-future = { path = "../../progressable-future" }

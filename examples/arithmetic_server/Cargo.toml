@@ -20,3 +20,7 @@ transport = {path = "../../transport"}
 execution = { path = "../../execution" }
 arithmetic-base = {path = "../arithmetic_base"}
 progressable-future = { path = "../../progressable-future" }
+
+[[bin]]
+name = "arithmetic-websocket-server"
+path = "./websocket_main.rs"
