@@ -10,9 +10,9 @@ axum            = "0.8"
 tokio-stream    = "0.1"
 reqwest         = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.28"
-transport            = { path = "../../transport" }
-execution            = { path = "../../execution" }
+transport            = { path = "../../transport", package = "allex-transport" }
+execution            = { path = "../../execution", package = "allex-execution" }
 arithmetic-base      = { path = "../arithmetic_base" }
-progressable-future  = { path = "../../progressable-future" }
+progressable-future  = { path = "../../progressable-future", package = "allex-progressable-future" }
 serde_json       = "1"
-identity             = { path = "../../identity" }
+identity             = { path = "../../identity", package = "allex-identity" }

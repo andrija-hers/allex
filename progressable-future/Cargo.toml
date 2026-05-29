@@ -1,9 +1,12 @@
 [package]
-name = "progressable-future"
+name = "allex-progressable-future"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "ProgressableFuture: a future that emits progress updates before completing."
+
+[lib]
+name = "progressable_future"
 
 # default uses std/tokio for ergonomics
 [features]

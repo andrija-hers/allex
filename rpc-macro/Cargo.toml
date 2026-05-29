@@ -1,5 +1,5 @@
 [package]
-name = "rpc-macro"
+name = "allex-rpc-macros"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,5 +1,5 @@
 [package]
-name = "identity"
+name = "allex-identity"
 version = "0.1.0"
 edition = "2024"
 
@@ -14,7 +14,7 @@ futures = "0.3"
 async-trait = "0.1"
 jsonwebtoken = "9"
 bcrypt = "0.15"
-transport = { path = "../transport" }
-rpc-macro = { path = "../rpc-macro" }
-execution = { path = "../execution" }
-progressable-future = { path = "../progressable-future" }
+transport = { path = "../transport", package = "allex-transport" }
+rpc-macro = { path = "../rpc-macro", package = "allex-rpc-macros" }
+execution = { path = "../execution", package = "allex-execution" }
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }

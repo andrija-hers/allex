@@ -15,7 +15,7 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
 tokio-stream = "0.1"
 axum = "0.8"
-transport = { path = "../../transport" }
-execution = { path = "../../execution" }
-progressable-future = { path = "../../progressable-future" }
-rpc-macro = { path = "../../rpc-macro" }
+transport = { path = "../../transport", package = "allex-transport" }
+execution = { path = "../../execution", package = "allex-execution" }
+progressable-future = { path = "../../progressable-future", package = "allex-progressable-future" }
+rpc-macro = { path = "../../rpc-macro", package = "allex-rpc-macros" }

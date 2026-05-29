@@ -1,0 +1,20 @@
+[package]
+name = "allex-postgres"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_postgres"
+path = "./lib.rs"
+
+[dependencies]
+allex-postgres-macros = { path = "../postgres-macros" }
+deadpool = "0.10"
+deadpool-postgres = { version = "0.11", features = ["rt_tokio_1"] }
+tokio-postgres = "0.7"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

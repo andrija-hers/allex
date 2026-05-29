@@ -1,0 +1,22 @@
+[package]
+name = "allex-identity-postgres"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_identity_postgres"
+path = "./lib.rs"
+
+[dependencies]
+allex-postgres = { path = "../postgres" }
+identity = { path = "../identity", package = "allex-identity" }
+transport = { path = "../transport", package = "allex-transport" }
+bcrypt = "0.15"
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
