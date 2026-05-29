@@ -2,7 +2,7 @@ use core::convert::Infallible;
 use core::future::Future;
 
 use futures::stream::{self, Stream, StreamExt};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Transport-side issues seen by the caller.
 #[derive(Debug, Clone)]
@@ -64,7 +64,6 @@ pub struct ProgressableFuture<P, T, E, X = Infallible> {
     progress_rx: Mutex<Option<mpsc::UnboundedReceiver<P>>>,
     result_rx: Mutex<Option<oneshot::Receiver<ProgressOutcome<T, E, X>>>>,
 }
-
 
 impl<T, E, X> ProgressOutcome<T, E, X> {
     /// Flatten the outcome into a `Result`, folding a transport issue into `E`
@@ -130,7 +129,9 @@ impl<P: Send + 'static, T: Send + 'static, E: Send + 'static, X: Send + 'static>
         let progress_rx: Option<_> = self.progress_rx.into_inner();
         let progress_stream = stream::unfold(progress_rx, |mut rx_opt| async move {
             let rx = rx_opt.as_mut()?;
-            rx.recv().await.map(|progress| (Step::Progress(progress), rx_opt))
+            rx.recv()
+                .await
+                .map(|progress| (Step::Progress(progress), rx_opt))
         });
 
         let result_rx = self.result_rx;
@@ -164,5 +165,4 @@ impl<P: Send + 'static, T: Send + 'static, E: Send + 'static, X: Send + 'static>
             ProgressOutcome::Transport(TransportIssue::Interrupted)
         }
     }
-
 }

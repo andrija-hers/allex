@@ -1,9 +1,9 @@
-use progressable_future::{ProgressableFuture, ProgressSender};
-use tokio::time::{Duration, sleep};
 use arithmetic_base::{
-    ArithmeticV1, AddRequest, AddResult, ArithmeticError,
-    CountRequest, CountStep, MulRequest, MulResult, StepsMade,
+    AddRequest, AddResult, ArithmeticError, ArithmeticV1, CountRequest, CountStep, MulRequest,
+    MulResult, StepsMade,
 };
+use progressable_future::{ProgressSender, ProgressableFuture};
+use tokio::time::{Duration, sleep};
 
 pub struct MyArithmetic;
 
@@ -16,14 +16,19 @@ impl ArithmeticV1 for MyArithmetic {
         Ok(MulResult { r: req.a * req.b })
     }
 
-    fn count(&self, req: CountRequest) -> ProgressableFuture<CountStep, StepsMade, ArithmeticError> {
+    fn count(
+        &self,
+        req: CountRequest,
+    ) -> ProgressableFuture<CountStep, StepsMade, ArithmeticError> {
         ProgressableFuture::new(move |sender: ProgressSender<CountStep>| async move {
             let step = if req.from <= req.to { 1_i32 } else { -1_i32 };
             let mut current = req.from;
             let mut total = 0_i32;
 
             loop {
-                sender.progress(CountStep { currently_at: current });
+                sender.progress(CountStep {
+                    currently_at: current,
+                });
                 total = total.checked_add(1).ok_or(ArithmeticError::Overflow)?;
 
                 if current == req.to {

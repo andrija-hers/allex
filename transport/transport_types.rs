@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payload(Vec<u8>);
@@ -36,8 +36,9 @@ pub enum Error {
     SendRequest(String),
     ModuleNotFound,
     ServerNotFound,
+    AccessForbidden,
     ReceiveResponse(String),
-    App(Payload)
+    App(Payload),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -51,31 +52,30 @@ pub trait UnaryCodec {
 }
 
 pub trait Encodable {
-    fn encode <C: UnaryCodec> (&self) -> Result<Payload>;
+    fn encode<C: UnaryCodec>(&self) -> Result<Payload>;
 }
 
-impl <T: Serialize> Encodable for T {
-    fn encode <C: UnaryCodec> (&self) -> Result<Payload> {
+impl<T: Serialize> Encodable for T {
+    fn encode<C: UnaryCodec>(&self) -> Result<Payload> {
         C::encode(&self)
     }
 }
 
 impl Error {
-    pub fn surely_encode<C: UnaryCodec> (&self) -> Payload {
+    pub fn surely_encode<C: UnaryCodec>(&self) -> Payload {
         match self.encode::<C>() {
             Ok(encoded) => encoded,
-            Err(_) => Payload::new("Error in encoding Error".as_bytes())
+            Err(_) => Payload::new("Error in encoding Error".as_bytes()),
         }
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MethodCall (String, Payload);
+pub struct MethodCall(String, Payload);
 
 impl MethodCall {
-    pub fn new<C: UnaryCodec, P: Serialize> (method: &str, payload: P) -> Result<Self> {
-        Ok(MethodCall (method.to_string(), C::encode::<P>(&payload)? ))
+    pub fn new<C: UnaryCodec, P: Serialize>(method: &str, payload: P) -> Result<Self> {
+        Ok(MethodCall(method.to_string(), C::encode::<P>(&payload)?))
     }
     pub fn get_method(&self) -> &str {
         &self.0
@@ -86,11 +86,18 @@ impl MethodCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModuleMethodCall (String, MethodCall);
+pub struct ModuleMethodCall(String, MethodCall);
 
 impl ModuleMethodCall {
-    pub fn new<C: UnaryCodec, P: Serialize> (module: &str, method: &str, payload: P) -> Result<Self> {
-        Ok(ModuleMethodCall(module.to_string(), MethodCall::new::<C, P>(method, payload)?))
+    pub fn new<C: UnaryCodec, P: Serialize>(
+        module: &str,
+        method: &str,
+        payload: P,
+    ) -> Result<Self> {
+        Ok(ModuleMethodCall(
+            module.to_string(),
+            MethodCall::new::<C, P>(method, payload)?,
+        ))
     }
     pub fn get_module(&self) -> &str {
         &self.0
@@ -104,11 +111,19 @@ impl ModuleMethodCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayedModuleMethodCall (String, ModuleMethodCall);
+pub struct RelayedModuleMethodCall(String, ModuleMethodCall);
 
 impl RelayedModuleMethodCall {
-    pub fn new<C: UnaryCodec, P: Serialize> (server: &str, module: &str, method: &str, payload: P) -> Result<Self> {
-        Ok(RelayedModuleMethodCall(server.to_string(), ModuleMethodCall::new::<C, P>(module, method, payload)?))
+    pub fn new<C: UnaryCodec, P: Serialize>(
+        server: &str,
+        module: &str,
+        method: &str,
+        payload: P,
+    ) -> Result<Self> {
+        Ok(RelayedModuleMethodCall(
+            server.to_string(),
+            ModuleMethodCall::new::<C, P>(module, method, payload)?,
+        ))
     }
     pub fn get_server(&self) -> &str {
         &self.0
@@ -128,8 +143,5 @@ impl RelayedModuleMethodCall {
 pub enum CallResponse {
     Success(Payload),
     Error(Payload),
-    Progress(Payload)
+    Progress(Payload),
 }
-
-
-

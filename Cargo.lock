@@ -12,6 +12,7 @@ dependencies = [
  "futures",
  "progressable-future",
  "reqwest",
+ "rpc-macro",
  "serde",
  "serde_json",
  "tokio",
@@ -1100,6 +1101,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rpc-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

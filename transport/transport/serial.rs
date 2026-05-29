@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CallResponse, Error, Payload, Result, UnaryCodec};
 
-use super::{CallResponseStream, ChunkedTransport, OneShotTransport};
 use super::NonNegativeWrappingAtomicI64;
+use super::{CallResponseStream, ChunkedTransport, OneShotTransport};
 
 static FRAMECOUNTER: NonNegativeWrappingAtomicI64 = NonNegativeWrappingAtomicI64::new(1);
 
@@ -49,7 +49,10 @@ pub enum SerialResponse {
 
 impl SerialResponse {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Success(_) | Self::AppError(_) | Self::Transport(_))
+        matches!(
+            self,
+            Self::Success(_) | Self::AppError(_) | Self::Transport(_)
+        )
     }
 }
 
@@ -91,7 +94,10 @@ impl ResponseFrame {
 pub type SerialResponseStream = Pin<Box<dyn Stream<Item = Result<SerialResponse>> + Send>>;
 
 pub trait SerialTransport {
-    fn send_frame(&self, frame: RequestFrame) -> impl Future<Output = Result<SerialResponseStream>> + Send;
+    fn send_frame(
+        &self,
+        frame: RequestFrame,
+    ) -> impl Future<Output = Result<SerialResponseStream>> + Send;
 }
 
 pub trait ServerSideSerialTransportItem {
@@ -229,16 +235,19 @@ mod tests {
     #[tokio::test]
     async fn chunked_maps_serial_responses_into_call_responses() {
         let transport = MockSerialTransport::new(vec![
-            Ok(SerialResponse::Progress(Payload::new(br#"{"currently_at":3}"#))),
+            Ok(SerialResponse::Progress(Payload::new(
+                br#"{"currently_at":3}"#,
+            ))),
             Ok(SerialResponse::Success(Payload::new(br#"{"total":4}"#))),
         ]);
 
-        let mut stream = <MockSerialTransport as ChunkedTransport>::send_payload_stream::<JsonCodec>(
-            &transport,
-            Payload::new(b"count"),
-        )
-        .await
-        .expect("stream should start");
+        let mut stream =
+            <MockSerialTransport as ChunkedTransport>::send_payload_stream::<JsonCodec>(
+                &transport,
+                Payload::new(b"count"),
+            )
+            .await
+            .expect("stream should start");
 
         match stream.next().await.expect("progress").expect("valid") {
             CallResponse::Progress(p) => assert_eq!(p.get_bytes(), br#"{"currently_at":3}"#),
@@ -252,9 +261,9 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_rejects_progress_only_responses() {
-        let transport = MockSerialTransport::new(vec![Ok(SerialResponse::Progress(
-            Payload::new(br#"{"currently_at":1}"#),
-        ))]);
+        let transport = MockSerialTransport::new(vec![Ok(SerialResponse::Progress(Payload::new(
+            br#"{"currently_at":1}"#,
+        )))]);
 
         let error = transport
             .send_payload(Payload::new(b"count"))

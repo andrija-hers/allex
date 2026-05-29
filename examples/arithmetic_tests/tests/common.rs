@@ -4,19 +4,21 @@
 use std::sync::Arc;
 
 use arithmetic_base::ArithmeticV1MethodResponder;
+use arithmetic_base::{
+    AddRequest, AddResult, ArithmeticError, ArithmeticV1, CountRequest, CountStep, MulRequest,
+    MulResult, StepsMade,
+};
 use execution::{ModuleExecutor, Registry};
 use futures::StreamExt;
-use progressable_future::{ProgressableFuture, ProgressSender};
-use tokio::{net::TcpListener, time::{Duration, sleep}};
-use transport::{
-    AxumTransport, JsonCodec, ModuleMethodCall, ServerSideChunkedTransportItem,
-    ServerSideOneShotTransport, ServerSideOneShotTransportItem,
-    ServerSideSerialTransport, ServerSideSerialTransportItem,
-    WebSocketSerialServer, Error,
+use progressable_future::{ProgressSender, ProgressableFuture};
+use tokio::{
+    net::TcpListener,
+    time::{Duration, sleep},
 };
-use arithmetic_base::{
-    ArithmeticV1, AddRequest, AddResult, ArithmeticError,
-    CountRequest, CountStep, MulRequest, MulResult, StepsMade,
+use transport::{
+    AxumTransport, Error, JsonCodec, ModuleMethodCall, ServerSideChunkedTransportItem,
+    ServerSideOneShotTransport, ServerSideOneShotTransportItem, ServerSideSerialTransport,
+    ServerSideSerialTransportItem, WebSocketSerialServer,
 };
 
 pub struct MyArithmetic;
@@ -30,15 +32,22 @@ impl ArithmeticV1 for MyArithmetic {
         Ok(MulResult { r: req.a * req.b })
     }
 
-    fn count(&self, req: CountRequest) -> ProgressableFuture<CountStep, StepsMade, ArithmeticError> {
+    fn count(
+        &self,
+        req: CountRequest,
+    ) -> ProgressableFuture<CountStep, StepsMade, ArithmeticError> {
         ProgressableFuture::new(move |sender: ProgressSender<CountStep>| async move {
             let step = if req.from <= req.to { 1_i32 } else { -1_i32 };
             let mut current = req.from;
             let mut total = 0_i32;
             loop {
-                sender.progress(CountStep { currently_at: current });
+                sender.progress(CountStep {
+                    currently_at: current,
+                });
                 total = total.checked_add(1).ok_or(ArithmeticError::Overflow)?;
-                if current == req.to { break; }
+                if current == req.to {
+                    break;
+                }
                 sleep(Duration::from_millis(5)).await;
                 current = current.checked_add(step).ok_or(ArithmeticError::Overflow)?;
             }
@@ -52,9 +61,9 @@ fn make_registry_and_responder() -> (
     Arc<ArithmeticV1MethodResponder<MyArithmetic, JsonCodec>>,
 ) {
     let registry = Arc::new(Registry::new());
-    let responder = Arc::new(
-        ArithmeticV1MethodResponder::<MyArithmetic, JsonCodec>::new(MyArithmetic),
-    );
+    let responder = Arc::new(ArithmeticV1MethodResponder::<MyArithmetic, JsonCodec>::new(
+        MyArithmetic,
+    ));
     registry.register_module(responder.clone());
     (registry, responder)
 }
@@ -75,18 +84,26 @@ pub async fn start_http_server() -> String {
         while let Some(item) = stream.next().await {
             let call = match item.get_payload().decode::<JsonCodec, ModuleMethodCall>() {
                 Ok(c) => c,
-                Err(e) => { let _ = item.respond_with(e.surely_encode::<JsonCodec>()).await; continue; }
+                Err(e) => {
+                    let _ = item.respond_with(e.surely_encode::<JsonCodec>()).await;
+                    continue;
+                }
             };
 
             if let Some(response_stream) =
-                responder.execute_streaming(call.get_method(), call.get_payload().clone())
+                responder.execute_streaming(call.get_method(), call.get_payload().clone(), None)
             {
                 let _ = item.respond_with_stream(response_stream).await;
                 continue;
             }
 
             let response = registry
-                .execute(call.get_module(), call.get_method(), call.get_payload().clone())
+                .execute(
+                    call.get_module(),
+                    call.get_method(),
+                    call.get_payload().clone(),
+                    None,
+                )
                 .await;
             let payload = match response {
                 Ok(p) => p,
@@ -110,25 +127,43 @@ pub async fn start_websocket_server() -> std::net::SocketAddr {
     let mut stream = transport.get_incoming_stream().await;
     tokio::spawn(async move {
         while let Some(item) = stream.next().await {
-            let call = match item.get_frame().get_payload().decode::<JsonCodec, ModuleMethodCall>() {
+            let call = match item
+                .get_frame()
+                .get_payload()
+                .decode::<JsonCodec, ModuleMethodCall>()
+            {
                 Ok(c) => c,
-                Err(e) => { let _ = item.respond_with_transport_error(e).await; continue; }
+                Err(e) => {
+                    let _ = item.respond_with_transport_error(e).await;
+                    continue;
+                }
             };
 
             if let Some(response_stream) =
-                responder.execute_streaming(call.get_method(), call.get_payload().clone())
+                responder.execute_streaming(call.get_method(), call.get_payload().clone(), None)
             {
                 let _ = item.respond_with_stream(response_stream).await;
                 continue;
             }
 
             match registry
-                .execute(call.get_module(), call.get_method(), call.get_payload().clone())
+                .execute(
+                    call.get_module(),
+                    call.get_method(),
+                    call.get_payload().clone(),
+                    None,
+                )
                 .await
             {
-                Ok(payload) => { let _ = item.respond_with(payload).await; }
-                Err(Error::App(payload)) => { let _ = item.respond_with_app_error(payload).await; }
-                Err(error) => { let _ = item.respond_with_transport_error(error).await; }
+                Ok(payload) => {
+                    let _ = item.respond_with(payload).await;
+                }
+                Err(Error::App(payload)) => {
+                    let _ = item.respond_with_app_error(payload).await;
+                }
+                Err(error) => {
+                    let _ = item.respond_with_transport_error(error).await;
+                }
             }
         }
     });

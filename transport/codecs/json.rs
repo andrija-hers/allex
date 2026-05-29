@@ -1,5 +1,5 @@
+use crate::{Error, Payload, Result, UnaryCodec};
 use serde::{Serialize, de::DeserializeOwned};
-use crate::{Error, Result, UnaryCodec, Payload};
 
 pub struct JsonCodec;
 impl UnaryCodec for JsonCodec {

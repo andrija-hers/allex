@@ -1,9 +1,9 @@
+use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::Arc;
-use async_trait::async_trait;
 
-use transport::{Payload, Result, Error};
 use crate::{MethodExecutor, ModuleExecutor, RelayedModuleExecutor};
+use transport::{Error, Payload, Result};
 
 pub struct Registry {
     servers: DashMap<String, Arc<dyn ModuleExecutor>>,
@@ -12,23 +12,26 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        Self { servers: DashMap::new(), modules: DashMap::new() }
+        Self {
+            servers: DashMap::new(),
+            modules: DashMap::new(),
+        }
     }
 
     pub fn register_server(&self, name: &str, executor: Arc<dyn ModuleExecutor>) {
         self.servers.insert(name.to_string(), executor);
     }
 
-    pub fn register_module (&self, module: Arc<dyn MethodExecutor>) {
+    pub fn register_module(&self, module: Arc<dyn MethodExecutor>) {
         self.modules.insert(module.get_name().to_string(), module);
     }
 }
 
 #[async_trait]
 impl ModuleExecutor for Registry {
-    async fn execute(&self, module: &str, method: &str, payload: Payload) -> Result<Payload> {
+    async fn execute(&self, module: &str, method: &str, payload: Payload, caller_role: Option<&str>) -> Result<Payload> {
         match self.modules.get(module) {
-            Some(executor) => executor.execute(method, payload).await,
+            Some(executor) => executor.execute(method, payload, caller_role).await,
             None => Err(Error::ModuleNotFound),
         }
     }
@@ -36,9 +39,16 @@ impl ModuleExecutor for Registry {
 
 #[async_trait]
 impl RelayedModuleExecutor for Registry {
-    async fn execute(&self, server: &str, module: &str, method: &str, payload: Payload) -> Result<Payload> {
+    async fn execute(
+        &self,
+        server: &str,
+        module: &str,
+        method: &str,
+        payload: Payload,
+        caller_role: Option<&str>,
+    ) -> Result<Payload> {
         match self.servers.get(server) {
-            Some(executor) => executor.execute(module, method, payload).await,
+            Some(executor) => executor.execute(module, method, payload, caller_role).await,
             None => Err(Error::ServerNotFound),
         }
     }

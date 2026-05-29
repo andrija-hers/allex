@@ -1,15 +1,15 @@
 use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin};
 
-use futures::{Stream, StreamExt};
-use axum::body::{Body, Bytes};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use crate::transport_types::*;
 use crate::transport::{ServerSideOneShotTransport, ServerSideOneShotTransportItem};
+use crate::transport_types::*;
+use axum::body::{Body, Bytes};
 use axum::{
     extract::State,
     http::{StatusCode, header::CONTENT_TYPE},
-    response::{IntoResponse, Response}
+    response::{IntoResponse, Response},
 };
+use futures::{Stream, StreamExt};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 pub struct AxumTransport<C: UnaryCodec> {
@@ -40,13 +40,10 @@ impl ServerSideOneShotTransportItem for AxumOneShotItem {
         &self.payload
     }
 
-    async fn respond_with(
-        self,
-        payload: Payload,
-    ) -> Result<()> {
+    async fn respond_with(self, payload: Payload) -> Result<()> {
         self.response
             .send(AxumResponse::Unary(payload))
-            .map_err(|e| Error::SendRequest(format!("Could not send response, the caller dropped")))
+            .map_err(|_| Error::SendRequest(format!("Could not send response, the caller dropped")))
     }
 }
 
@@ -64,7 +61,11 @@ impl ServerSideChunkedTransportItem for AxumOneShotItem {
         async move {
             self.response
                 .send(AxumResponse::Stream(Box::pin(stream)))
-                .map_err(|_| Error::SendRequest("Could not send streamed response, the caller dropped".to_string()))
+                .map_err(|_| {
+                    Error::SendRequest(
+                        "Could not send streamed response, the caller dropped".to_string(),
+                    )
+                })
         }
     }
 }
@@ -76,9 +77,7 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
     async fn get_incoming_stream(&self) -> Self::ItemStream {
         let mut guard = self.rx.lock().await;
 
-        let rx = guard
-            .take()
-            .expect("incoming stream already taken");
+        let rx = guard.take().expect("incoming stream already taken");
 
         ReceiverStream::new(rx)
     }

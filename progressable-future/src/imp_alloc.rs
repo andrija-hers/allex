@@ -2,12 +2,12 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::convert::Infallible;
 use core::future::Future;
+use core::marker::PhantomData;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use alloc::sync::Arc;
-use core::marker::PhantomData;
 
 /// Transport-side issues seen by the caller.
 #[derive(Debug, Clone)]

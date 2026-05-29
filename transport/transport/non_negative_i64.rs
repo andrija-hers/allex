@@ -22,18 +22,12 @@ impl NonNegativeWrappingAtomicI64 {
         debug_assert!(current >= 0);
 
         loop {
-            let next = if current == i64::MAX {
-                1
-            } else {
-                current + 1
-            };
+            let next = if current == i64::MAX { 1 } else { current + 1 };
 
-            match self.inner.compare_exchange(
-                current,
-                next,
-                ordering,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .inner
+                .compare_exchange(current, next, ordering, Ordering::Relaxed)
+            {
                 Ok(old) => return old,
                 Err(actual) => current = actual,
             }

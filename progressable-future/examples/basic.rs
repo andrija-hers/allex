@@ -1,7 +1,7 @@
-use progressable_future::{ProgressOutcome, ProgressableFuture, Step, TransportIssue};
-use tokio::time::{sleep, Duration};
-use futures::stream::StreamExt;
 use futures::pin_mut;
+use futures::stream::StreamExt;
+use progressable_future::{ProgressOutcome, ProgressableFuture, Step, TransportIssue};
+use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() {
