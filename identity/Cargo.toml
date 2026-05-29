@@ -1,0 +1,20 @@
+[package]
+name = "identity"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "./lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
+futures = "0.3"
+async-trait = "0.1"
+jsonwebtoken = "9"
+bcrypt = "0.15"
+transport = { path = "../transport" }
+rpc-macro = { path = "../rpc-macro" }
+execution = { path = "../execution" }
+progressable-future = { path = "../progressable-future" }

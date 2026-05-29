@@ -10,15 +10,17 @@ use arithmetic_base::{
 };
 use execution::{ModuleExecutor, Registry};
 use futures::StreamExt;
+use identity::{InMemoryIdentityStore};
 use progressable_future::{ProgressSender, ProgressableFuture};
 use tokio::{
     net::TcpListener,
     time::{Duration, sleep},
 };
 use transport::{
-    AxumTransport, Error, JsonCodec, ModuleMethodCall, ServerSideChunkedTransportItem,
-    ServerSideOneShotTransport, ServerSideOneShotTransportItem, ServerSideSerialTransport,
-    ServerSideSerialTransportItem, WebSocketSerialServer,
+    AxumTransport, BearerTokenValidator, Error, JsonCodec, ModuleMethodCall,
+    IdentityTransportItem, ServerSideChunkedTransportItem, ServerSideOneShotTransport,
+    ServerSideOneShotTransportItem, ServerSideSerialTransport, ServerSideSerialTransportItem,
+    SignalRAxumTransport, WebSocketSerialServer,
 };
 
 pub struct MyArithmetic;
@@ -169,4 +171,68 @@ pub async fn start_websocket_server() -> std::net::SocketAddr {
     });
 
     address
+}
+
+/// Starts a SignalR server (negotiate + WebSocket) on a free port.
+///
+/// Returns `(base_url, identity_store)`.  Tests can call
+/// `identity_store.register(...)` / `identity_store.login(...)` to obtain
+/// JWTs that can then be used with the negotiate endpoint.
+pub async fn start_signalr_server() -> (String, Arc<InMemoryIdentityStore>) {
+    let identity = Arc::new(InMemoryIdentityStore::new("test-secret-key"));
+
+    let transport =
+        SignalRAxumTransport::new(identity.clone() as Arc<dyn BearerTokenValidator>, 128);
+    let app = transport.router();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (registry, responder) = make_registry_and_responder();
+    let mut stream = transport.get_incoming_stream().await;
+    tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            let caller_role = item.caller_role().map(|s| s.to_string());
+            let call = match item.get_payload().decode::<JsonCodec, ModuleMethodCall>() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = item.respond_with_transport_error(e).await;
+                    continue;
+                }
+            };
+
+            if let Some(response_stream) = responder.execute_streaming(
+                call.get_method(),
+                call.get_payload().clone(),
+                caller_role.as_deref(),
+            ) {
+                let _ = item.respond_with_stream(response_stream).await;
+                continue;
+            }
+
+            match registry
+                .execute(
+                    call.get_module(),
+                    call.get_method(),
+                    call.get_payload().clone(),
+                    caller_role.as_deref(),
+                )
+                .await
+            {
+                Ok(payload) => {
+                    let _ = item.respond_with(payload).await;
+                }
+                Err(Error::App(payload)) => {
+                    let _ = item.respond_with_app_error(payload).await;
+                }
+                Err(error) => {
+                    let _ = item.respond_with_transport_error(error).await;
+                }
+            }
+        }
+    });
+
+    (format!("http://{address}"), identity)
 }
