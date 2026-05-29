@@ -12,6 +12,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
+/// Axum-backed server transport for unary and streamed HTTP RPC requests.
 pub struct AxumTransport<C: UnaryCodec> {
     rx: tokio::sync::Mutex<Option<mpsc::Receiver<AxumOneShotItem>>>,
     tx: mpsc::Sender<AxumOneShotItem>,
@@ -19,6 +20,7 @@ pub struct AxumTransport<C: UnaryCodec> {
 }
 
 impl<C: UnaryCodec> AxumTransport<C> {
+    /// Creates a new transport with the given inbound buffering capacity.
     pub fn new(buffer: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer);
 
@@ -30,6 +32,7 @@ impl<C: UnaryCodec> AxumTransport<C> {
     }
 }
 
+/// Server-side handle for a single inbound Axum RPC request.
 pub struct AxumOneShotItem {
     payload: Payload,
     response: tokio::sync::oneshot::Sender<AxumResponse>,
@@ -47,7 +50,9 @@ impl ServerSideOneShotTransportItem for AxumOneShotItem {
     }
 }
 
+/// Extension trait for transports that can stream Axum responses.
 pub trait ServerSideChunkedTransportItem {
+    /// Completes the request by streaming progress and terminal frames to the client.
     fn respond_with_stream<S>(self, stream: S) -> impl Future<Output = Result<()>> + Send
     where
         S: Stream<Item = CallResponse> + Send + 'static;
@@ -89,6 +94,7 @@ enum AxumResponse {
 }
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
+    /// Axum handler for `POST /rpc`.
     pub async fn handle_post(
         State(tx): State<mpsc::Sender<AxumOneShotItem>>,
         body: Bytes,
@@ -162,6 +168,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
 use axum::{Router, routing::post};
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
+    /// Builds the Axum router exposing this transport on `POST /rpc`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/rpc", post(Self::handle_post))

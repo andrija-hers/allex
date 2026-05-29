@@ -5,12 +5,14 @@ use std::sync::Arc;
 use crate::{MethodExecutor, ModuleExecutor, RelayedModuleExecutor};
 use transport::{Error, Payload, Result};
 
+/// In-memory registry of module executors and relayed server executors.
 pub struct Registry {
     servers: DashMap<String, Arc<dyn ModuleExecutor>>,
     modules: DashMap<String, Arc<dyn MethodExecutor>>,
 }
 
 impl Registry {
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self {
             servers: DashMap::new(),
@@ -18,10 +20,12 @@ impl Registry {
         }
     }
 
+    /// Registers a named upstream server executor for relayed calls.
     pub fn register_server(&self, name: &str, executor: Arc<dyn ModuleExecutor>) {
         self.servers.insert(name.to_string(), executor);
     }
 
+    /// Registers a local module executor keyed by its reported module name.
     pub fn register_module(&self, module: Arc<dyn MethodExecutor>) {
         self.modules.insert(module.get_name().to_string(), module);
     }
@@ -29,7 +33,13 @@ impl Registry {
 
 #[async_trait]
 impl ModuleExecutor for Registry {
-    async fn execute(&self, module: &str, method: &str, payload: Payload, caller_role: Option<&str>) -> Result<Payload> {
+    async fn execute(
+        &self,
+        module: &str,
+        method: &str,
+        payload: Payload,
+        caller_role: Option<&str>,
+    ) -> Result<Payload> {
         match self.modules.get(module) {
             Some(executor) => executor.execute(method, payload, caller_role).await,
             None => Err(Error::ModuleNotFound),

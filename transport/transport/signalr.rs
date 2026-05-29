@@ -23,14 +23,17 @@ use crate::{
 
 /// Implemented by anything that can verify a Bearer JWT and return the corresponding role.
 pub trait BearerTokenValidator: Send + Sync {
+    /// Validates a bearer token and returns the authenticated caller role on success.
     fn validate_bearer(&self, token: &str) -> Option<String>;
 }
 
 // ─── negotiate response ──────────────────────────────────────────────────────
 
+/// JSON body returned by the SignalR negotiate endpoint.
 #[derive(Debug, Serialize)]
 pub struct SignalRNegotiateResponse {
     #[serde(rename = "connectionId")]
+    /// One-time connection identifier to present on the WebSocket upgrade request.
     pub connection_id: String,
     /// Non-null enables future redirect / multi-server scaling.
     pub url: Option<String>,
@@ -91,9 +94,8 @@ impl ServerSideChunkedTransportItem for SignalRItem {
         while let Some(response) = stream.next().await {
             match response {
                 CallResponse::Progress(payload) => {
-                    let item =
-                        serde_json::from_slice::<serde_json::Value>(payload.get_bytes())
-                            .map_err(|e| Error::Serialize(e.to_string()))?;
+                    let item = serde_json::from_slice::<serde_json::Value>(payload.get_bytes())
+                        .map_err(|e| Error::Serialize(e.to_string()))?;
                     if outgoing
                         .send(SignalROutgoing::StreamItem {
                             invocation_id: invocation_id.clone(),
@@ -101,15 +103,12 @@ impl ServerSideChunkedTransportItem for SignalRItem {
                         })
                         .is_err()
                     {
-                        return Err(Error::SendRequest(
-                            "SignalR outgoing channel closed".into(),
-                        ));
+                        return Err(Error::SendRequest("SignalR outgoing channel closed".into()));
                     }
                 }
                 CallResponse::Success(payload) => {
-                    let result =
-                        serde_json::from_slice::<serde_json::Value>(payload.get_bytes())
-                            .map_err(|e| Error::Serialize(e.to_string()))?;
+                    let result = serde_json::from_slice::<serde_json::Value>(payload.get_bytes())
+                        .map_err(|e| Error::Serialize(e.to_string()))?;
                     let _ = outgoing.send(SignalROutgoing::Completion {
                         invocation_id: invocation_id.clone(),
                         result: Some(result),
@@ -139,9 +138,7 @@ impl ServerSideChunkedTransportItem for SignalRItem {
             let _ = outgoing.send(SignalROutgoing::Completion {
                 invocation_id,
                 result: None,
-                error: Some(
-                    "streaming handler ended without a terminal response".to_string(),
-                ),
+                error: Some("streaming handler ended without a terminal response".to_string()),
             });
             return Err(Error::ReceiveResponse(
                 "streaming handler ended without a terminal response".to_string(),
@@ -207,6 +204,7 @@ pub struct SignalRAxumTransport {
 }
 
 impl SignalRAxumTransport {
+    /// Creates a SignalR transport backed by the supplied bearer-token validator.
     pub fn new(validator: Arc<dyn BearerTokenValidator>, buffer: usize) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::channel(buffer);
         Self {
@@ -217,6 +215,7 @@ impl SignalRAxumTransport {
         }
     }
 
+    /// Builds the Axum router exposing `/hub/negotiate` and `/hub`.
     pub fn router(&self) -> Router {
         let state = Arc::new(SignalRAxumState {
             sessions: self.sessions.clone(),
@@ -256,7 +255,10 @@ async fn handle_negotiate(
     let token = match extract_bearer(&headers) {
         Some(t) => t,
         None => {
-            return (StatusCode::UNAUTHORIZED, "Missing Authorization: Bearer header")
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Missing Authorization: Bearer header",
+            )
                 .into_response();
         }
     };
@@ -293,8 +295,7 @@ async fn handle_ws_upgrade(
     let role = match state.sessions.lock().await.remove(&connection_id) {
         Some(r) => r,
         None => {
-            return (StatusCode::UNAUTHORIZED, "Unknown or expired connection id")
-                .into_response();
+            return (StatusCode::UNAUTHORIZED, "Unknown or expired connection id").into_response();
         }
     };
     ws.on_upgrade(move |socket| handle_socket(socket, role, state.incoming_tx.clone()))
@@ -369,10 +370,7 @@ async fn dispatch_record(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let target = value
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let target = value.get("target").and_then(|v| v.as_str()).unwrap_or("");
             if target != "rpc" {
                 let _ = out_tx.send(SignalROutgoing::Completion {
                     invocation_id,
@@ -449,12 +447,19 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 
 fn encode_outgoing(msg: SignalROutgoing) -> String {
     let json = match msg {
-        SignalROutgoing::StreamItem { invocation_id, item } => serde_json::json!({
+        SignalROutgoing::StreamItem {
+            invocation_id,
+            item,
+        } => serde_json::json!({
             "type": 2,
             "invocationId": invocation_id,
             "item": item,
         }),
-        SignalROutgoing::Completion { invocation_id, result, error } => {
+        SignalROutgoing::Completion {
+            invocation_id,
+            result,
+            error,
+        } => {
             let mut obj = serde_json::json!({
                 "type": 3,
                 "invocationId": invocation_id,

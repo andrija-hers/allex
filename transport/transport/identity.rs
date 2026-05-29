@@ -11,13 +11,16 @@ use super::{
 pub trait IdentityTransportItem:
     ServerSideOneShotTransportItem + ServerSideChunkedTransportItem
 {
+    /// Returns the authenticated caller role, if the transport established one.
     fn caller_role(&self) -> Option<&str>;
 
+    /// Completes the request with an application-level error payload.
     fn respond_with_app_error(
         self,
         payload: Payload,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    /// Completes the request with a transport-level error.
     fn respond_with_transport_error(
         self,
         error: Error,
@@ -39,6 +42,7 @@ where
 
 /// A Serial transport item that carries the authenticated caller's role.
 pub trait IdentitySerialTransportItem: ServerSideSerialTransportItem {
+    /// Returns the authenticated caller role, if the transport established one.
     fn caller_role(&self) -> Option<&str>;
 }
 

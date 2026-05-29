@@ -490,7 +490,9 @@ fn exposes_allowed_roles_metadata() {
     // add is #[public] — no role restriction
     assert!(ArithmeticV1MethodPermissions::is_public("add"));
     assert_eq!(ArithmeticV1MethodPermissions::allowed_roles("add"), None);
-    assert!(ArithmeticV1MethodPermissions::is_role_allowed("add", "anyone"));
+    assert!(ArithmeticV1MethodPermissions::is_role_allowed(
+        "add", "anyone"
+    ));
 
     // mul requires "user"
     assert!(!ArithmeticV1MethodPermissions::is_public("mul"));
@@ -498,8 +500,12 @@ fn exposes_allowed_roles_metadata() {
         ArithmeticV1MethodPermissions::allowed_roles("mul"),
         Some(&["user"][..]),
     );
-    assert!(ArithmeticV1MethodPermissions::is_role_allowed("mul", "user"));
-    assert!(!ArithmeticV1MethodPermissions::is_role_allowed("mul", "guest"));
+    assert!(ArithmeticV1MethodPermissions::is_role_allowed(
+        "mul", "user"
+    ));
+    assert!(!ArithmeticV1MethodPermissions::is_role_allowed(
+        "mul", "guest"
+    ));
 
     // count requires "admin"
     assert!(!ArithmeticV1MethodPermissions::is_public("count"));
@@ -507,12 +513,19 @@ fn exposes_allowed_roles_metadata() {
         ArithmeticV1MethodPermissions::allowed_roles("count"),
         Some(&["admin"][..]),
     );
-    assert!(ArithmeticV1MethodPermissions::is_role_allowed("count", "admin"));
-    assert!(!ArithmeticV1MethodPermissions::is_role_allowed("count", "user"));
+    assert!(ArithmeticV1MethodPermissions::is_role_allowed(
+        "count", "admin"
+    ));
+    assert!(!ArithmeticV1MethodPermissions::is_role_allowed(
+        "count", "user"
+    ));
 
     // unknown method
     assert!(!ArithmeticV1MethodPermissions::is_public("missing"));
-    assert_eq!(ArithmeticV1MethodPermissions::allowed_roles("missing"), None);
+    assert_eq!(
+        ArithmeticV1MethodPermissions::allowed_roles("missing"),
+        None
+    );
 }
 
 // ── access-control tests ─────────────────────────────────────────────────────
@@ -542,7 +555,9 @@ impl crate::ArithmeticV1 for PermissiveImpl {
             for i in from..=to {
                 sender.progress(CountStep { currently_at: i });
             }
-            Ok(StepsMade { total: to - from + 1 })
+            Ok(StepsMade {
+                total: to - from + 1,
+            })
         })
     }
 }
@@ -569,7 +584,9 @@ async fn admin_cannot_call_mul() {
     let execution::Response::Error(p) = response else {
         panic!("expected Error response");
     };
-    let err = p.decode::<transport::JsonCodec, transport::Error>().unwrap();
+    let err = p
+        .decode::<transport::JsonCodec, transport::Error>()
+        .unwrap();
     assert!(
         matches!(err, transport::Error::AccessForbidden),
         "expected AccessForbidden, got {err:?}"
@@ -587,11 +604,16 @@ async fn user_cannot_call_count() {
     );
     let stream = stream.expect("expected a stream back for a streaming method");
     pin_mut!(stream);
-    let first_frame = stream.next().await.expect("stream must yield at least one frame");
+    let first_frame = stream
+        .next()
+        .await
+        .expect("stream must yield at least one frame");
     let CallResponse::Error(p) = first_frame else {
         panic!("expected Error frame");
     };
-    let err = p.decode::<transport::JsonCodec, transport::Error>().unwrap();
+    let err = p
+        .decode::<transport::JsonCodec, transport::Error>()
+        .unwrap();
     assert!(
         matches!(err, transport::Error::AccessForbidden),
         "expected AccessForbidden, got {err:?}"
@@ -613,4 +635,3 @@ async fn public_method_accessible_without_role() {
         "public method should be callable without a role"
     );
 }
-

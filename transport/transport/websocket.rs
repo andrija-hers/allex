@@ -30,6 +30,7 @@ enum WebSocketSerialMessage {
     Response(ResponseFrame),
 }
 
+/// WebSocket serial transport client that multiplexes requests over a single socket.
 pub struct WebSocketSerialClient<C: UnaryCodec> {
     pending: Arc<Mutex<HashMap<i64, mpsc::UnboundedSender<Result<SerialResponse>>>>>,
     outgoing: mpsc::UnboundedSender<WebSocketSerialMessage>,
@@ -40,6 +41,7 @@ impl<C> WebSocketSerialClient<C>
 where
     C: UnaryCodec + Send + Sync + 'static,
 {
+    /// Connects to a WebSocket serial transport endpoint.
     pub async fn connect(url: &str) -> Result<Self> {
         let (stream, _) = connect_async(url)
             .await
@@ -84,6 +86,7 @@ where
     }
 }
 
+/// WebSocket serial transport server that yields inbound frames as transport items.
 pub struct WebSocketSerialServer<C: UnaryCodec> {
     incoming: Mutex<Option<mpsc::Receiver<WebSocketSerialItem>>>,
     local_addr: SocketAddr,
@@ -94,6 +97,7 @@ impl<C> WebSocketSerialServer<C>
 where
     C: UnaryCodec + Send + Sync + 'static,
 {
+    /// Binds a WebSocket serial transport server to the supplied address.
     pub async fn bind(addr: &str, buffer: usize) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
@@ -112,6 +116,7 @@ where
         })
     }
 
+    /// Returns the local socket address chosen for this server.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -131,6 +136,7 @@ where
     }
 }
 
+/// Server-side handle for a single inbound WebSocket serial request.
 pub struct WebSocketSerialItem {
     frame: RequestFrame,
     outgoing: mpsc::UnboundedSender<WebSocketSerialMessage>,

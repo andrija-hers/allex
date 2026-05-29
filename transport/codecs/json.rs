@@ -1,6 +1,7 @@
 use crate::{Error, Payload, Result, UnaryCodec};
 use serde::{Serialize, de::DeserializeOwned};
 
+/// JSON codec backed by `serde_json`.
 pub struct JsonCodec;
 impl UnaryCodec for JsonCodec {
     fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {

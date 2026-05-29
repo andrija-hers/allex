@@ -1,3 +1,5 @@
+//! Procedural macros for defining RPC modules and generating transport-facing glue.
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -6,6 +8,14 @@ use syn::{
     TypeParamBound, parse_macro_input, punctuated::Punctuated,
 };
 
+/// Expands an RPC trait into the client, responder, and permission helpers used by this workspace.
+///
+/// The annotated trait remains the source of truth for request/response types and access-control
+/// metadata. The macro generates:
+///
+/// - a transport-backed client trait,
+/// - an `execution::MethodResponder` adapter for server dispatch, and
+/// - a permissions helper with the module name and role metadata.
 #[proc_macro_attribute]
 pub fn rpc_module(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let trait_item = parse_macro_input!(item as ItemTrait);
@@ -27,6 +37,26 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
     let encode_helper_ident =
         format_ident!("__{}_encode_payload", module_name_from_trait(&trait_ident));
     let module_name = module_name_from_trait(&trait_ident);
+    let client_trait_doc =
+        format!("Transport-backed client interface generated from [`{trait_ident}`].");
+    let responder_doc = format!("Server-side responder adapter generated from [`{trait_ident}`].");
+    let responder_new_doc =
+        format!("Wraps an implementation of [`{trait_ident}`] for server-side dispatch.");
+    let response_stream_doc = format!(
+        "Pinned stream of [`transport::CallResponse`] values produced by `{trait_ident}` streaming methods."
+    );
+    let execute_streaming_doc =
+        format!("Dispatches a streaming `{trait_ident}` method call after applying role checks.");
+    let permissions_doc =
+        format!("Role metadata generated from the methods declared on [`{trait_ident}`].");
+    let module_name_doc = format!("Canonical module name used on the wire for [`{trait_ident}`].");
+    let allowed_roles_doc = format!(
+        "Returns the roles allowed to call a `{trait_ident}` method, or `None` for unknown methods."
+    );
+    let is_public_doc =
+        format!("Returns whether a `{trait_ident}` method is marked with `#[public]`.");
+    let is_role_allowed_doc =
+        format!("Returns whether the supplied role may call a `{trait_ident}` method.");
 
     let mut methods = Vec::new();
     for item in &mut trait_item.items {
@@ -77,6 +107,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
     Ok(quote! {
         #trait_item
 
+        #[doc = #client_trait_doc]
         pub trait #client_ident<C: ::transport::UnaryCodec> {
             #(#client_trait_methods)*
         }
@@ -89,12 +120,14 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             #(#client_impl_methods)*
         }
 
+        #[doc = #responder_doc]
         pub struct #responder_ident<I, C> {
             inner: I,
             _codec: ::std::marker::PhantomData<C>,
         }
 
         impl<I, C> #responder_ident<I, C> {
+            #[doc = #responder_new_doc]
             pub fn new(inner: I) -> Self {
                 Self {
                     inner,
@@ -103,6 +136,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             }
         }
 
+        #[doc = #response_stream_doc]
         pub type #response_stream_ident =
             ::std::pin::Pin<Box<dyn ::futures::Stream<Item = ::transport::CallResponse> + Send>>;
 
@@ -111,6 +145,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             I: #trait_ident + Send + Sync,
             C: ::transport::UnaryCodec + Send + Sync + 'static,
         {
+            #[doc = #execute_streaming_doc]
             pub fn execute_streaming(
                 &self,
                 method: &str,
@@ -173,11 +208,14 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             type Codec = C;
         }
 
+        #[doc = #permissions_doc]
         pub struct #permissions_ident;
 
         impl #permissions_ident {
+            #[doc = #module_name_doc]
             pub const MODULE_NAME: &'static str = #module_name;
 
+            #[doc = #allowed_roles_doc]
             pub fn allowed_roles(method: &str) -> Option<&'static [&'static str]> {
                 match method {
                     #(#permission_arms)*
@@ -185,6 +223,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 }
             }
 
+            #[doc = #is_public_doc]
             pub fn is_public(method: &str) -> bool {
                 match method {
                     #(#is_public_arms)*
@@ -192,6 +231,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 }
             }
 
+            #[doc = #is_role_allowed_doc]
             pub fn is_role_allowed(method: &str, role: &str) -> bool {
                 Self::is_public(method)
                     || Self::allowed_roles(method)
@@ -249,6 +289,7 @@ struct MethodInfo {
     request_ty: Type,
     kind: MethodKind,
     roles: RolesSpec,
+    doc_attrs: Vec<Attribute>,
 }
 
 enum MethodKind {
@@ -275,12 +316,19 @@ impl MethodInfo {
             request_ty,
             kind,
             roles,
+            doc_attrs: method
+                .attrs
+                .iter()
+                .filter(|attr| attr.path().is_ident("doc"))
+                .cloned()
+                .collect(),
         })
     }
 
     fn client_trait_method(&self) -> proc_macro2::TokenStream {
         let method_ident = &self.ident;
         let request_ty = &self.request_ty;
+        let doc_attrs = &self.doc_attrs;
 
         match &self.kind {
             MethodKind::Unary {
@@ -288,6 +336,7 @@ impl MethodInfo {
                 error_ty,
                 ..
             } => quote! {
+                #(#doc_attrs)*
                 fn #method_ident(
                     &self,
                     req: #request_ty,
@@ -300,6 +349,7 @@ impl MethodInfo {
                 success_ty,
                 error_ty,
             } => quote! {
+                #(#doc_attrs)*
                 fn #method_ident(
                     &self,
                     req: #request_ty,

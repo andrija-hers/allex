@@ -5,11 +5,13 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use std::{future::Future, pin::Pin};
 
+/// HTTP transport that sends unary and chunked RPC requests over `POST /rpc`.
 pub struct HttpTransport {
     base_url: String,
 }
 
 impl HttpTransport {
+    /// Creates a new transport rooted at the supplied server base URL.
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: format!("{}/rpc", base_url),
@@ -17,9 +19,12 @@ impl HttpTransport {
     }
 }
 
+/// Stream of chunked call responses produced by HTTP transports.
 pub type CallResponseStream = Pin<Box<dyn Stream<Item = Result<CallResponse>> + Send>>;
 
+/// Minimal transport for streaming RPC responses.
 pub trait ChunkedTransport {
+    /// Sends a serialized request payload and resolves with a stream of response frames.
     fn send_payload_stream<C: UnaryCodec + Send + 'static>(
         &self,
         payload: Payload,
@@ -52,18 +57,22 @@ impl<T: ChunkedTransport + Sync, C: UnaryCodec + Send + 'static, S: Serialize + 
     }
 }
 
+/// Convenience client helpers built on top of [`ChunkedTransport`].
 pub trait ClientSideChunkedTransport<C: UnaryCodec, P: Serialize> {
+    /// Executes a bare method call and returns the streamed response frames.
     fn execute_method_call_stream(
         &self,
         method: &str,
         payload: P,
     ) -> impl Future<Output = Result<CallResponseStream>> + Send;
+    /// Executes a module-scoped method call and returns the streamed response frames.
     fn execute_module_method_call_stream(
         &self,
         module: &str,
         method: &str,
         payload: P,
     ) -> impl Future<Output = Result<CallResponseStream>> + Send;
+    /// Executes a relayed module call on another named server and returns the streamed response frames.
     fn execute_relayed_module_method_call_stream(
         &self,
         server: &str,

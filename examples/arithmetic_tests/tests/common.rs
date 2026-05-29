@@ -10,17 +10,17 @@ use arithmetic_base::{
 };
 use execution::{ModuleExecutor, Registry};
 use futures::StreamExt;
-use identity::{InMemoryIdentityStore};
+use identity::InMemoryIdentityStore;
 use progressable_future::{ProgressSender, ProgressableFuture};
 use tokio::{
     net::TcpListener,
     time::{Duration, sleep},
 };
 use transport::{
-    AxumTransport, BearerTokenValidator, Error, JsonCodec, ModuleMethodCall,
-    IdentityTransportItem, ServerSideChunkedTransportItem, ServerSideOneShotTransport,
-    ServerSideOneShotTransportItem, ServerSideSerialTransport, ServerSideSerialTransportItem,
-    SignalRAxumTransport, WebSocketSerialServer,
+    AxumTransport, BearerTokenValidator, Error, IdentityTransportItem, JsonCodec, ModuleMethodCall,
+    ServerSideChunkedTransportItem, ServerSideOneShotTransport, ServerSideOneShotTransportItem,
+    ServerSideSerialTransport, ServerSideSerialTransportItem, SignalRAxumTransport,
+    WebSocketSerialServer,
 };
 
 pub struct MyArithmetic;

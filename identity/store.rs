@@ -33,6 +33,7 @@ struct IdentityStoreInner {
 pub struct InMemoryIdentityStore(Arc<IdentityStoreInner>);
 
 impl InMemoryIdentityStore {
+    /// Creates a new in-memory store that signs and validates JWTs with the given secret.
     pub fn new(secret: impl Into<String>) -> Self {
         Self(Arc::new(IdentityStoreInner {
             secret: secret.into(),
@@ -116,8 +117,7 @@ impl IdentityV1 for InMemoryIdentityStore {
 
             let password = req.password.clone();
             let valid = tokio::task::spawn_blocking(move || {
-                verify(password, &password_hash)
-                    .map_err(|e| IdentityError::Internal(e.to_string()))
+                verify(password, &password_hash).map_err(|e| IdentityError::Internal(e.to_string()))
             })
             .await
             .map_err(|e| IdentityError::Internal(e.to_string()))??;

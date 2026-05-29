@@ -87,7 +87,7 @@ impl<P: Send + 'static, T: Send + 'static, E: Send + 'static>
     ///
     /// Progress and the result/error types are fully caller-defined.
     /// The `X` transport-error type defaults to `Infallible`; use
-    /// [`new_with_transport`] if you need a concrete transport-error type.
+    /// [`ProgressableFuture::new_with_transport`] if you need a concrete transport-error type.
     pub fn new<Fut, F>(operation: F) -> Self
     where
         F: FnOnce(ProgressSender<P>) -> Fut + Send + 'static,

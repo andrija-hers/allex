@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arithmetic_base::{AddRequest, CountRequest, MulRequest};
 use futures::{SinkExt, StreamExt};
-use identity::{InMemoryIdentityStore, RegisterRequest, IdentityV1};
+use identity::{IdentityV1, InMemoryIdentityStore, RegisterRequest};
 use serde_json::Value;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use transport::{JsonCodec, ModuleMethodCall};
@@ -61,11 +61,10 @@ async fn ws_connect(
         >,
     >,
 ) {
-    let ws_url = base_url
-        .replace("http://", "ws://")
-        + "/hub?id="
-        + connection_id;
-    let (ws, _) = connect_async(ws_url).await.expect("WebSocket connect should succeed");
+    let ws_url = base_url.replace("http://", "ws://") + "/hub?id=" + connection_id;
+    let (ws, _) = connect_async(ws_url)
+        .await
+        .expect("WebSocket connect should succeed");
     let (mut write, mut read) = ws.split();
 
     // Send SignalR handshake
@@ -130,11 +129,9 @@ async fn rpc_call(
             _ => continue,
         };
         for record in text.split('\x1e').filter(|s| !s.trim().is_empty()) {
-            let value: Value =
-                serde_json::from_str(record).expect("valid JSON record");
+            let value: Value = serde_json::from_str(record).expect("valid JSON record");
             if value.get("type").and_then(|t| t.as_u64()) == Some(3)
-                && value.get("invocationId").and_then(|v| v.as_str())
-                    == Some(invocation_id)
+                && value.get("invocationId").and_then(|v| v.as_str()) == Some(invocation_id)
             {
                 return value;
             }
@@ -211,9 +208,12 @@ async fn signalr_add_returns_correct_result() {
     let connection_id = body["connectionId"].as_str().unwrap();
     let (mut write, mut read) = ws_connect(&base_url, connection_id).await;
 
-    let mmc =
-        ModuleMethodCall::new::<JsonCodec, AddRequest>("arithmetic_v_1", "add", AddRequest { a: 7, b: 3 })
-            .expect("build ModuleMethodCall");
+    let mmc = ModuleMethodCall::new::<JsonCodec, AddRequest>(
+        "arithmetic_v_1",
+        "add",
+        AddRequest { a: 7, b: 3 },
+    )
+    .expect("build ModuleMethodCall");
     let args_json = serde_json::to_value(&mmc).expect("serialize");
 
     let completion = rpc_call(&mut write, &mut read, "inv-1", args_json).await;
@@ -362,4 +362,3 @@ async fn signalr_unknown_target_returns_error() {
         "expected error field for unknown target, got: {completion}"
     );
 }
-

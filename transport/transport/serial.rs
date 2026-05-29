@@ -10,44 +10,57 @@ use super::{CallResponseStream, ChunkedTransport, OneShotTransport};
 
 static FRAMECOUNTER: NonNegativeWrappingAtomicI64 = NonNegativeWrappingAtomicI64::new(1);
 
+/// Request frame used by serial transports to correlate responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestFrame(i64, Payload);
 
 impl RequestFrame {
+    /// Creates a new request frame with a fresh positive request identifier.
     pub fn new(payload: Payload) -> Self {
         Self(FRAMECOUNTER.fetch_inc_wrap(Ordering::Relaxed), payload)
     }
 
+    /// Returns the negative identifier used by response frames for this request.
     pub fn response_id(&self) -> i64 {
         -self.get_id()
     }
 
+    /// Returns the request frame identifier.
     pub fn get_id(&self) -> i64 {
         self.0
     }
 
+    /// Returns the encoded request payload.
     pub fn get_payload(&self) -> &Payload {
         &self.1
     }
 
+    /// Returns whether this frame is a request frame.
     pub fn is_request(&self) -> bool {
         self.0 > 0
     }
 
+    /// Returns whether this frame is a response frame.
     pub fn is_response(&self) -> bool {
         self.0 < 0
     }
 }
 
+/// Response variants emitted by serial transports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SerialResponse {
+    /// Non-terminal progress payload.
     Progress(Payload),
+    /// Terminal success payload.
     Success(Payload),
+    /// Terminal application-level error payload.
     AppError(Payload),
+    /// Terminal transport-level error.
     Transport(Error),
 }
 
 impl SerialResponse {
+    /// Returns whether this response ends the exchange.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -66,54 +79,73 @@ impl From<CallResponse> for SerialResponse {
     }
 }
 
+/// Response frame used by serial transports to correlate results to requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseFrame(i64, SerialResponse);
 
 impl ResponseFrame {
+    /// Creates a response frame addressed to the provided request frame.
     pub fn response_to(frame: &RequestFrame, response: SerialResponse) -> Self {
         Self(frame.response_id(), response)
     }
 
+    /// Returns the raw response-frame identifier.
     pub fn get_id(&self) -> i64 {
         self.0
     }
 
+    /// Returns the original request identifier this frame answers.
     pub fn get_request_id(&self) -> i64 {
         -self.0
     }
 
+    /// Borrows the contained response value.
     pub fn get_response(&self) -> &SerialResponse {
         &self.1
     }
 
+    /// Consumes the frame and returns the contained response value.
     pub fn into_response(self) -> SerialResponse {
         self.1
     }
 }
 
+/// Stream of serial responses for a single in-flight request.
 pub type SerialResponseStream = Pin<Box<dyn Stream<Item = Result<SerialResponse>> + Send>>;
 
+/// Bidirectional transport that exchanges framed serial requests and responses.
 pub trait SerialTransport {
+    /// Sends a request frame and returns the stream of responses associated with it.
     fn send_frame(
         &self,
         frame: RequestFrame,
     ) -> impl Future<Output = Result<SerialResponseStream>> + Send;
 }
 
+/// Server-side handle for a single inbound serial request frame.
 pub trait ServerSideSerialTransportItem {
+    /// Returns the received request frame.
     fn get_frame(&self) -> &RequestFrame;
+    /// Completes the request with a terminal success payload.
     fn respond_with(self, payload: Payload) -> impl Future<Output = Result<()>> + Send;
+    /// Completes the request with a terminal application-level error payload.
     fn respond_with_app_error(self, payload: Payload) -> impl Future<Output = Result<()>> + Send;
+    /// Completes the request with a terminal transport-level error.
     fn respond_with_transport_error(self, error: Error) -> impl Future<Output = Result<()>> + Send;
+    /// Streams zero or more progress frames followed by a terminal response.
     fn respond_with_stream<S>(self, stream: S) -> impl Future<Output = Result<()>> + Send
     where
         S: Stream<Item = CallResponse> + Send + 'static;
 }
 
+/// Server-side source of inbound serial transport items.
 pub trait ServerSideSerialTransport {
+    /// Item type yielded for each inbound request.
     type Item: ServerSideSerialTransportItem;
+    /// Stream type used to yield inbound requests.
     type ItemStream: Stream<Item = Self::Item>;
 
+    /// Returns the stream of inbound serial requests handled by this transport.
     fn get_incoming_stream(&self) -> impl Future<Output = Self::ItemStream> + Send;
 }
 
