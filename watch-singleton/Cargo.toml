@@ -1,0 +1,10 @@
+[package]
+name = "allex-watch-singleton"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "./lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["sync"] }

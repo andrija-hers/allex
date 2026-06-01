@@ -12,4 +12,5 @@ members = [
     "examples/arithmetic_base",
     "examples/arithmetic_client",
     "examples/arithmetic_server",
+    "watch-singleton",
     "examples/arithmetic_tests"]
