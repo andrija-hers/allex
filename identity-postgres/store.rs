@@ -128,10 +128,7 @@ impl IdentityV1 for PostgresIdentityStore {
                 return Err(IdentityError::HandleAlreadyTaken);
             }
 
-            let store = PostgresIdentityStore {
-                db,
-                secret,
-            };
+            let store = PostgresIdentityStore { db, secret };
             let token = store.issue_jwt(&req.handle, &req.role)?;
             Ok(TokenResponse { token })
         }

@@ -7,7 +7,7 @@
 //! cargo test -p allex-postgres
 //! ```
 
-use allex_postgres::{Db, DbError, RowExt, RowVecExt, FromRow};
+use allex_postgres::{Db, DbError, FromRow, RowExt, RowVecExt};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
@@ -20,7 +20,10 @@ use testcontainers_modules::postgres::Postgres;
 /// The container is returned so its lifetime is tied to the test function;
 /// dropping it stops the container.
 async fn start_db() -> (Db, testcontainers::ContainerAsync<Postgres>) {
-    let container = Postgres::default().start().await.expect("Docker must be running");
+    let container = Postgres::default()
+        .start()
+        .await
+        .expect("Docker must be running");
     let host = container.get_host().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let conn_str = format!("postgres://postgres:postgres@{host}:{port}/postgres");
@@ -195,10 +198,7 @@ async fn from_row_derive_rename_attribute_reads_aliased_column() {
     let record = db
         .with_client(|client| async move {
             let rows = client
-                .query(
-                    "SELECT 'Bob'::text AS full_name, 95::int4 AS score",
-                    &[],
-                )
+                .query("SELECT 'Bob'::text AS full_name, 95::int4 AS score", &[])
                 .await?;
             let a = Aliased::try_from(rows.into_iter().next().unwrap())?;
             Ok::<_, DbError>(a)
@@ -229,9 +229,7 @@ async fn connect_with_max_one_allows_sequential_queries() {
     for i in 0_i32..3 {
         let result = db
             .with_client(|client| async move {
-                let rows = client
-                    .query("SELECT $1::int4 AS n", &[&i])
-                    .await?;
+                let rows = client.query("SELECT $1::int4 AS n", &[&i]).await?;
                 let v: i32 = rows[0].get("n");
                 Ok::<_, DbError>(v)
             })

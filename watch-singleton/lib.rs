@@ -83,10 +83,11 @@ pub struct WatchSingleton<C> {
     tx: OnceLock<watch::Sender<Arc<C>>>,
 }
 
-
 impl<C: Send + Sync + 'static> WatchSingleton<C> {
     pub const fn new() -> Self {
-        Self { tx: OnceLock::new() }
+        Self {
+            tx: OnceLock::new(),
+        }
     }
 
     /// Initialize the singleton. Must be called once before any other method.

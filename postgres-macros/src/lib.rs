@@ -41,9 +41,12 @@ pub fn derive_from_row(input: TokenStream) -> TokenStream {
             ..
         }) => &fields.named,
         _ => {
-            return syn::Error::new_spanned(input, "FromRow only works on structs with named fields")
-                .to_compile_error()
-                .into()
+            return syn::Error::new_spanned(
+                input,
+                "FromRow only works on structs with named fields",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 

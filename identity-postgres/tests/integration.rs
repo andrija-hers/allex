@@ -10,9 +10,9 @@
 use allex_identity_postgres::PostgresIdentityStore;
 use allex_postgres::Db;
 use identity::{IdentityError, IdentityV1, LoginRequest, RegisterRequest, ValidateRequest};
-use transport::BearerTokenValidator;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+use transport::BearerTokenValidator;
 
 const SECRET: &str = "test-jwt-secret-key-for-integration-tests";
 
@@ -20,8 +20,14 @@ const SECRET: &str = "test-jwt-secret-key-for-integration-tests";
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn start_store() -> (PostgresIdentityStore, testcontainers::ContainerAsync<Postgres>) {
-    let container = Postgres::default().start().await.expect("Docker must be running");
+async fn start_store() -> (
+    PostgresIdentityStore,
+    testcontainers::ContainerAsync<Postgres>,
+) {
+    let container = Postgres::default()
+        .start()
+        .await
+        .expect("Docker must be running");
     let host = container.get_host().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let conn_str = format!("postgres://postgres:postgres@{host}:{port}/postgres");
@@ -54,7 +60,10 @@ fn login(handle: &str, password: &str) -> LoginRequest {
 async fn setup_is_idempotent() {
     let (store, _c) = start_store().await;
     // Calling setup a second time must not return an error.
-    store.setup().await.expect("second setup call must be idempotent");
+    store
+        .setup()
+        .await
+        .expect("second setup call must be idempotent");
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +167,9 @@ async fn validate_token_signed_with_wrong_secret_returns_error() {
         WRONG_SIGNATURE_HERE";
     let _ = host; // suppress unused warning
     let err = store
-        .validate(ValidateRequest { token: bad_token.into() })
+        .validate(ValidateRequest {
+            token: bad_token.into(),
+        })
         .await
         .unwrap_err();
     assert!(
