@@ -1,11 +1,14 @@
-use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin};
+use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 
-use crate::transport::{ServerSideOneShotTransport, ServerSideOneShotTransportItem};
+use crate::transport::{
+    IdentityTransportItem, ServerSideOneShotTransport, ServerSideOneShotTransportItem,
+};
 use crate::transport_types::*;
+use crate::BearerTokenValidator;
 use axum::body::{Body, Bytes};
 use axum::{
     extract::State,
-    http::{StatusCode, header::CONTENT_TYPE},
+    http::{StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
 use futures::{Stream, StreamExt};
@@ -36,6 +39,7 @@ impl<C: UnaryCodec> AxumTransport<C> {
 pub struct AxumOneShotItem {
     payload: Payload,
     response: tokio::sync::oneshot::Sender<AxumResponse>,
+    caller_role: Option<String>,
 }
 
 impl ServerSideOneShotTransportItem for AxumOneShotItem {
@@ -72,6 +76,25 @@ impl ServerSideChunkedTransportItem for AxumOneShotItem {
                     )
                 })
         }
+    }
+}
+
+impl IdentityTransportItem for AxumOneShotItem {
+    fn caller_role(&self) -> Option<&str> {
+        self.caller_role.as_deref()
+    }
+
+    async fn respond_with_app_error(self, payload: Payload) -> Result<()> {
+        self.response
+            .send(AxumResponse::Unary(payload))
+            .map_err(|_| Error::SendRequest("Could not send app error response".to_string()))
+    }
+
+    async fn respond_with_transport_error(self, error: Error) -> Result<()> {
+        let payload = error.surely_encode::<crate::JsonCodec>();
+        self.response
+            .send(AxumResponse::Unary(payload))
+            .map_err(|_| Error::SendRequest("Could not send transport error response".to_string()))
     }
 }
 
@@ -117,6 +140,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         let item = AxumOneShotItem {
             payload,
             response: response_tx,
+            caller_role: None,
         };
 
         if tx.send(item).await.is_err() {
@@ -167,12 +191,92 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
 
 use axum::{Router, routing::post};
 
+/// Combined state for an authenticated Axum transport.
+#[derive(Clone)]
+struct AuthState {
+    tx: mpsc::Sender<AxumOneShotItem>,
+    validator: Arc<dyn BearerTokenValidator>,
+}
+
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     /// Builds the Axum router exposing this transport on `POST /rpc`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/rpc", post(Self::handle_post))
             .with_state(self.tx.clone())
+    }
+
+    /// Builds an Axum router that validates `Authorization: Bearer <token>` on every request
+    /// and attaches the caller role to each [`AxumOneShotItem`].
+    pub fn router_with_auth(&self, validator: Arc<dyn BearerTokenValidator>) -> Router {
+        Router::new()
+            .route("/rpc", post(Self::handle_post_auth))
+            .with_state(AuthState { tx: self.tx.clone(), validator })
+    }
+
+    async fn handle_post_auth(
+        State(state): State<AuthState>,
+        headers: axum::http::HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let caller_role = headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(|token| state.validator.validate_bearer(token));
+
+        let payload = match C::decode::<Payload>(&body) {
+            Ok(p) => p,
+            Err(err) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Could not decode request payload: {err:?}"),
+                );
+            }
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let item = AxumOneShotItem {
+            payload,
+            response: response_tx,
+            caller_role,
+        };
+
+        if state.tx.send(item).await.is_err() {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Transport receiver is not available",
+            );
+        }
+
+        match response_rx.await {
+            Ok(AxumResponse::Unary(response_payload)) => match C::encode(&response_payload) {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "application/json")],
+                    bytes.get_bytes_forever(),
+                )
+                    .into_response(),
+                Err(err) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Could not encode response payload: {err:?}"),
+                ),
+            },
+            Ok(AxumResponse::Stream(stream)) => (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "application/x-ndjson")],
+                Body::from_stream(stream.filter_map(|response| async move {
+                    encode_call_response::<C>(&response)
+                        .ok()
+                        .map(|bytes| Ok::<Bytes, Infallible>(bytes))
+                })),
+            )
+                .into_response(),
+            Err(_) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Server-side handler dropped the response channel",
+            ),
+        }
     }
 }
 

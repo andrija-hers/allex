@@ -8,6 +8,7 @@ use std::{future::Future, pin::Pin};
 /// HTTP transport that sends unary and chunked RPC requests over `POST /rpc`.
 pub struct HttpTransport {
     base_url: String,
+    bearer: Option<String>,
 }
 
 impl HttpTransport {
@@ -15,6 +16,15 @@ impl HttpTransport {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: format!("{}/rpc", base_url),
+            bearer: None,
+        }
+    }
+
+    /// Creates a transport that attaches `Authorization: Bearer <token>` to every request.
+    pub fn new_with_bearer(base_url: &str, token: impl Into<String>) -> Self {
+        Self {
+            base_url: format!("{}/rpc", base_url),
+            bearer: Some(token.into()),
         }
     }
 }
@@ -125,11 +135,16 @@ impl<T: ChunkedTransport + Sync, C: UnaryCodec + Send + 'static, P: Serialize + 
 impl OneShotTransport for HttpTransport {
     fn send_payload(&self, payload: Payload) -> impl Future<Output = Result<Payload>> + Send {
         let url = self.base_url.clone();
+        let bearer = self.bearer.clone();
 
         async move {
             let client = reqwest::Client::new();
+            let mut req = client.post(&url).json(&payload);
+            if let Some(token) = &bearer {
+                req = req.bearer_auth(token);
+            }
 
-            let response = client.post(&url).json(&payload).send().await.map_err(|e| {
+            let response = req.send().await.map_err(|e| {
                 Error::SendRequest(format!(
                     "Could not send {} bytes to {}: {}",
                     payload.len(),
@@ -162,11 +177,16 @@ impl ChunkedTransport for HttpTransport {
         payload: Payload,
     ) -> impl Future<Output = Result<CallResponseStream>> + Send {
         let url = self.base_url.clone();
+        let bearer = self.bearer.clone();
 
         async move {
             let client = reqwest::Client::new();
+            let mut req = client.post(&url).json(&payload);
+            if let Some(token) = &bearer {
+                req = req.bearer_auth(token);
+            }
 
-            let response = client.post(&url).json(&payload).send().await.map_err(|e| {
+            let response = req.send().await.map_err(|e| {
                 Error::SendRequest(format!(
                     "Could not send {} bytes to {}: {}",
                     payload.len(),
