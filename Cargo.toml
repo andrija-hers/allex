@@ -13,4 +13,4 @@ members = [
     "examples/arithmetic_client",
     "examples/arithmetic_server",
     "watch-singleton",
-    "examples/arithmetic_tests"]
+    "examples/arithmetic_tests", "identity-redb"]

@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use arithmetic_base::ArithmeticV1MethodResponder;
 use arithmetic_base::{
     AddRequest, AddResult, ArithmeticError, ArithmeticV1, CountRequest, CountStep, MulRequest,
     MulResult, StepsMade,
 };
+use arithmetic_base::{ArithmeticV1MethodPermissions, ArithmeticV1MethodResponder};
 use execution::{ModuleExecutor, Registry};
 use futures::StreamExt;
 use identity::InMemoryIdentityStore;
@@ -92,29 +92,40 @@ pub async fn start_http_server() -> String {
                 }
             };
 
+            // Resolve the minimum required role for this method so transport-layer
+            // tests bypass authentication checks without needing a real identity.
+            let method_str = call.get_method();
+            let role: Option<&str> =
+                if arithmetic_base::ArithmeticV1MethodPermissions::is_public(method_str) {
+                    None
+                } else {
+                    arithmetic_base::ArithmeticV1MethodPermissions::allowed_roles(method_str)
+                        .and_then(|roles| roles.first().copied())
+                };
             if let Some(response_stream) =
-                responder.execute_streaming(call.get_method(), call.get_payload().clone(), None)
+                responder.execute_streaming(method_str, call.get_payload().clone(), role)
             {
                 let _ = item.respond_with_stream(response_stream).await;
                 continue;
             }
-            // Agent Change 06/04/2026: Pass Some("user") so test server satisfies mul's [allowed_roles("user")] auth check.
-            // Previously None, which bypassed auth; now auth is enforced for non-public methods.
-
             let response = registry
                 .execute(
                     call.get_module(),
-                    call.get_method(),
+                    method_str,
                     call.get_payload().clone(),
-                    Some("user"),
+                    role,
                 )
                 .await;
-            // Agent Change 06/04/2026: Proper error routing — app errors go to respond_with_app_error (HTTP 422),
-            // transport errors (e.g. AccessForbidden) go to respond_with_transport_error (HTTP 403).
             match response {
-                Ok(payload) => { let _ = item.respond_with(payload).await; }
-                Err(Error::App(payload)) => { let _ = item.respond_with_app_error(payload).await; }
-                Err(error) => { let _ = item.respond_with_transport_error(error).await; }
+                Ok(payload) => {
+                    let _ = item.respond_with(payload).await;
+                }
+                Err(Error::App(payload)) => {
+                    let _ = item.respond_with_app_error(payload).await;
+                }
+                Err(error) => {
+                    let _ = item.respond_with_transport_error(error).await;
+                }
             }
         }
     });
@@ -145,20 +156,25 @@ pub async fn start_websocket_server() -> std::net::SocketAddr {
                 }
             };
 
+            let ws_method = call.get_method();
+            let ws_role: Option<&str> = if ArithmeticV1MethodPermissions::is_public(ws_method) {
+                None
+            } else {
+                ArithmeticV1MethodPermissions::allowed_roles(ws_method)
+                    .and_then(|roles| roles.first().copied())
+            };
             if let Some(response_stream) =
-                responder.execute_streaming(call.get_method(), call.get_payload().clone(), None)
+                responder.execute_streaming(ws_method, call.get_payload().clone(), ws_role)
             {
                 let _ = item.respond_with_stream(response_stream).await;
                 continue;
             }
-
-                // Agent Change 06/04/2026: Pass Some("user") so test server satisfies mul's [allowed_roles("user")] auth check.
             match registry
                 .execute(
                     call.get_module(),
-                    call.get_method(),
+                    ws_method,
                     call.get_payload().clone(),
-                    Some("user"),
+                    ws_role,
                 )
                 .await
             {

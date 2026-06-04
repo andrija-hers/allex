@@ -152,15 +152,6 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 payload: ::transport::Payload,
                 caller_role: ::std::option::Option<&str>,
             ) -> Option<#response_stream_ident> {
-                if let ::std::option::Option::Some(role) = caller_role {
-                    if !#permissions_ident::is_role_allowed(method, role) {
-                        return Some(Box::pin(::futures::stream::once(::std::future::ready(
-                            ::transport::CallResponse::Error(
-                                ::transport::Error::AccessForbidden.surely_encode::<C>(),
-                            ),
-                        ))));
-                    }
-                }
                 match method {
                     #(#execute_streaming_arms)*
                     _ => None,
@@ -184,20 +175,10 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 payload: ::transport::Payload,
                 caller_role: ::std::option::Option<&str>,
             ) -> ::execution::Response {
-                // Agent Change 06/04/2026: Auth enforcement — non-public methods require a valid caller_role.
-                // Previously only checked if Some(role) was present; None skipped auth entirely (unauthenticated bypass bug).
-                // Now: None = forbidden, Some(disallowed_role) = forbidden. Returns TransportError(AccessForbidden),
-                // NOT Response::Error, so the client receives HTTP 403 (not 422) and maps it to Err(Error::AccessForbidden).
-                if !#permissions_ident::is_public(method) {
-                    let forbidden = match caller_role {
-                        ::std::option::Option::None => true,
-                        ::std::option::Option::Some(role) => !#permissions_ident::is_role_allowed(method, role),
-                    };
-                    if forbidden {
-                        return ::execution::Response::TransportError(
-                            ::transport::Error::AccessForbidden,
-                        );
-                    }
+                if !#permissions_ident::is_authorized(method, caller_role) {
+                    return ::execution::Response::TransportError(
+                        ::transport::Error::AccessForbidden,
+                    );
                 }
                 match method {
                     #(#execute_arms)*
@@ -244,6 +225,16 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 Self::is_public(method)
                     || Self::allowed_roles(method)
                         .is_some_and(|roles| roles.iter().any(|allowed| *allowed == role))
+            }
+
+            /// Returns `true` when `caller_role` is permitted to call `method`.
+            ///
+            /// Anonymous callers (`None`) are only permitted on `#[public]` methods.
+            pub fn is_authorized(method: &str, caller_role: ::std::option::Option<&str>) -> bool {
+                match caller_role {
+                    ::std::option::Option::Some(role) => Self::is_role_allowed(method, role),
+                    ::std::option::Option::None => Self::is_public(method),
+                }
             }
         }
 
@@ -484,7 +475,7 @@ impl MethodInfo {
     fn execute_streaming_arm(
         &self,
         encode_helper_ident: &Ident,
-        _permissions_ident: &Ident,
+        permissions_ident: &Ident,
     ) -> Option<proc_macro2::TokenStream> {
         let MethodKind::Streaming {
             progress_ty: _,
@@ -501,6 +492,13 @@ impl MethodInfo {
 
         Some(quote! {
             #method_name => {
+                if !#permissions_ident::is_authorized(#method_name, caller_role) {
+                    return Some(Box::pin(::futures::stream::once(::std::future::ready(
+                        ::transport::CallResponse::Error(
+                            ::transport::Error::AccessForbidden.surely_encode::<C>(),
+                        ),
+                    ))));
+                }
                 let req = match payload.decode::<C, #request_ty>() {
                     Ok(req) => req,
                     Err(error) => {

@@ -1,0 +1,23 @@
+[package]
+name = "allex-identity-redb"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_identity_redb"
+path = "./src/lib.rs"
+
+[dependencies]
+identity = { path = "../identity", package = "allex-identity" }
+transport = { path = "../transport", package = "allex-transport" }
+bcrypt = "0.15"
+jsonwebtoken = "9"
+redb = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

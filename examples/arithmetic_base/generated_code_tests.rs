@@ -634,3 +634,45 @@ async fn public_method_accessible_without_role() {
         "public method should be callable without a role"
     );
 }
+
+#[tokio::test]
+async fn anonymous_cannot_call_mul() {
+    let responder = make_responder();
+    let response = execution::MethodResponder::execute(
+        &responder,
+        "mul",
+        encode(&MulRequest { a: 3, b: 4 }),
+        None,
+    )
+    .await;
+    let execution::Response::TransportError(err) = response else {
+        panic!("expected TransportError response for anonymous caller on role-restricted method");
+    };
+    assert!(
+        matches!(err, transport::Error::AccessForbidden),
+        "expected AccessForbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn anonymous_cannot_call_count() {
+    let responder = make_responder();
+    let stream =
+        responder.execute_streaming("count", encode(&CountRequest { from: 1, to: 3 }), None);
+    let stream = stream.expect("expected a stream back for streaming method");
+    pin_mut!(stream);
+    let first_frame = stream
+        .next()
+        .await
+        .expect("stream must yield at least one frame");
+    let CallResponse::Error(p) = first_frame else {
+        panic!("expected Error frame for anonymous caller on role-restricted streaming method");
+    };
+    let err = p
+        .decode::<transport::JsonCodec, transport::Error>()
+        .unwrap();
+    assert!(
+        matches!(err, transport::Error::AccessForbidden),
+        "expected AccessForbidden, got {err:?}"
+    );
+}
