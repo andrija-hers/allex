@@ -83,17 +83,19 @@ impl IdentityTransportItem for AxumOneShotItem {
     fn caller_role(&self) -> Option<&str> {
         self.caller_role.as_deref()
     }
+    // Agent Change 06/04/2026: respond_with_app_error now sends AxumResponse::AppError(payload) instead of Unary(payload), enabling HTTP 422 response.
 
     async fn respond_with_app_error(self, payload: Payload) -> Result<()> {
         self.response
-            .send(AxumResponse::Unary(payload))
+            .send(AxumResponse::AppError(payload))
             .map_err(|_| Error::SendRequest("Could not send app error response".to_string()))
     }
 
+    // Agent Change 06/04/2026: Changed to pass error directly as TransportError variant instead of encoding to JSON payload on HTTP 200.
     async fn respond_with_transport_error(self, error: Error) -> Result<()> {
-        let payload = error.surely_encode::<crate::JsonCodec>();
+        // transport error — pass directly to handler
         self.response
-            .send(AxumResponse::Unary(payload))
+            .send(AxumResponse::TransportError(error))
             .map_err(|_| Error::SendRequest("Could not send transport error response".to_string()))
     }
 }
@@ -105,8 +107,14 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
     async fn get_incoming_stream(&self) -> Self::ItemStream {
         let mut guard = self.rx.lock().await;
 
-        let rx = guard.take().expect("incoming stream already taken");
-
+        let rx = match guard.take() {
+            Some(rx) => rx,
+            None => {
+                eprintln!("[axum] get_incoming_stream called more than once — returning empty stream");
+                let (_, rx) = mpsc::channel(1);
+                rx
+            }
+        };
         ReceiverStream::new(rx)
     }
 }
@@ -114,6 +122,10 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
 enum AxumResponse {
     Unary(Payload),
     Stream(Pin<Box<dyn Stream<Item = CallResponse> + Send>>),
+    // Agent Change 06/04/2026: Added AppError variant — carries an app-level error Payload to be returned as HTTP 422.
+    AppError(Payload),
+    // Agent Change 06/04/2026: Added TransportError variant — carries a transport::Error (e.g. AccessForbidden) to be returned as HTTP 403.
+    TransportError(Error),
 }
 
 impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
@@ -166,7 +178,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             AxumResponse::Unary(response_payload) => match C::encode(&response_payload) {
                 Ok(bytes) => (
                     StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
+                    [(CONTENT_TYPE, C::content_type())],
                     bytes.get_bytes_forever(),
                 )
                     .into_response(),
@@ -179,12 +191,34 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 StatusCode::OK,
                 [(CONTENT_TYPE, "application/x-ndjson")],
                 Body::from_stream(stream.filter_map(|response| async move {
-                    encode_call_response::<C>(&response)
-                        .ok()
-                        .map(|bytes| Ok::<Bytes, Infallible>(bytes))
+                    match encode_call_response::<C>(&response) {
+                        Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
+                        Err(e) => { eprintln!("[axum] stream encode error: {e:?}"); None }
+                    }
                 })),
             )
                 .into_response(),
+            // Agent Change 06/04/2026: Maps AppError to HTTP 422 (Unprocessable Entity) so client can decode app-level errors.
+            AxumResponse::AppError(response_payload) => match C::encode(&response_payload) {
+                Ok(bytes) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [(CONTENT_TYPE, C::content_type())],
+                    bytes.get_bytes_forever(),
+                )
+                    .into_response(),
+                Err(err) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Could not encode app error payload: {err:?}"),
+                ),
+            },
+            // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the unauthenticated handler.
+            AxumResponse::TransportError(error) => match error {
+                Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                _ => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Transport error: {error:?}"),
+                ),
+            },
         }
     }
 }
@@ -253,7 +287,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             Ok(AxumResponse::Unary(response_payload)) => match C::encode(&response_payload) {
                 Ok(bytes) => (
                     StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
+                    [(CONTENT_TYPE, C::content_type())],
                     bytes.get_bytes_forever(),
                 )
                     .into_response(),
@@ -266,12 +300,34 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 StatusCode::OK,
                 [(CONTENT_TYPE, "application/x-ndjson")],
                 Body::from_stream(stream.filter_map(|response| async move {
-                    encode_call_response::<C>(&response)
-                        .ok()
-                        .map(|bytes| Ok::<Bytes, Infallible>(bytes))
+                    match encode_call_response::<C>(&response) {
+                        Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
+                        Err(e) => { eprintln!("[axum] stream encode error: {e:?}"); None }
+                    }
                 })),
             )
                 .into_response(),
+            // Agent Change 06/04/2026: Maps AppError to HTTP 422 (Unprocessable Entity) in the authenticated handler so client can decode app-level errors.
+            Ok(AxumResponse::AppError(response_payload)) => match C::encode(&response_payload) {
+                Ok(bytes) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [(CONTENT_TYPE, C::content_type())],
+                    bytes.get_bytes_forever(),
+                )
+                    .into_response(),
+                Err(err) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Could not encode app error payload: {err:?}"),
+                ),
+            },
+            // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the authenticated handler.
+            Ok(AxumResponse::TransportError(error)) => match error {
+                Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                _ => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Transport error: {error:?}"),
+                ),
+            },
             Err(_) => error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Server-side handler dropped the response channel",

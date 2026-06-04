@@ -98,20 +98,24 @@ pub async fn start_http_server() -> String {
                 let _ = item.respond_with_stream(response_stream).await;
                 continue;
             }
+            // Agent Change 06/04/2026: Pass Some("user") so test server satisfies mul's [allowed_roles("user")] auth check.
+            // Previously None, which bypassed auth; now auth is enforced for non-public methods.
 
             let response = registry
                 .execute(
                     call.get_module(),
                     call.get_method(),
                     call.get_payload().clone(),
-                    None,
+                    Some("user"),
                 )
                 .await;
-            let payload = match response {
-                Ok(p) => p,
-                Err(e) => e.surely_encode::<JsonCodec>(),
-            };
-            let _ = item.respond_with(payload).await;
+            // Agent Change 06/04/2026: Proper error routing — app errors go to respond_with_app_error (HTTP 422),
+            // transport errors (e.g. AccessForbidden) go to respond_with_transport_error (HTTP 403).
+            match response {
+                Ok(payload) => { let _ = item.respond_with(payload).await; }
+                Err(Error::App(payload)) => { let _ = item.respond_with_app_error(payload).await; }
+                Err(error) => { let _ = item.respond_with_transport_error(error).await; }
+            }
         }
     });
 
@@ -148,12 +152,13 @@ pub async fn start_websocket_server() -> std::net::SocketAddr {
                 continue;
             }
 
+                // Agent Change 06/04/2026: Pass Some("user") so test server satisfies mul's [allowed_roles("user")] auth check.
             match registry
                 .execute(
                     call.get_module(),
                     call.get_method(),
                     call.get_payload().clone(),
-                    None,
+                    Some("user"),
                 )
                 .await
             {

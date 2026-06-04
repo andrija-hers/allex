@@ -184,10 +184,18 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 payload: ::transport::Payload,
                 caller_role: ::std::option::Option<&str>,
             ) -> ::execution::Response {
-                if let ::std::option::Option::Some(role) = caller_role {
-                    if !#permissions_ident::is_role_allowed(method, role) {
-                        return ::execution::Response::Error(
-                            ::transport::Error::AccessForbidden.surely_encode::<C>(),
+                // Agent Change 06/04/2026: Auth enforcement — non-public methods require a valid caller_role.
+                // Previously only checked if Some(role) was present; None skipped auth entirely (unauthenticated bypass bug).
+                // Now: None = forbidden, Some(disallowed_role) = forbidden. Returns TransportError(AccessForbidden),
+                // NOT Response::Error, so the client receives HTTP 403 (not 422) and maps it to Err(Error::AccessForbidden).
+                if !#permissions_ident::is_public(method) {
+                    let forbidden = match caller_role {
+                        ::std::option::Option::None => true,
+                        ::std::option::Option::Some(role) => !#permissions_ident::is_role_allowed(method, role),
+                    };
+                    if forbidden {
+                        return ::execution::Response::TransportError(
+                            ::transport::Error::AccessForbidden,
                         );
                     }
                 }

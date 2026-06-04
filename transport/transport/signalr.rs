@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 
 use axum::{
     Json, Router,
@@ -13,6 +13,7 @@ use axum::{
 use futures::{SinkExt, StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::{Duration as TokioDuration, timeout};
 use uuid::Uuid;
 
 use crate::{CallResponse, Error, Payload, Result};
@@ -51,6 +52,7 @@ enum SignalROutgoing {
         result: Option<serde_json::Value>,
         error: Option<String>,
     },
+    Pong,
 }
 
 // ─── public item handed to the server dispatch loop ─────────────────────────
@@ -180,12 +182,11 @@ impl IdentityTransportItem for SignalRItem {
 // ─── axum state ──────────────────────────────────────────────────────────────
 
 struct SignalRAxumState {
-    /// Pending sessions: connection_id → role (single-use ticket).
-    sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// Pending sessions: connection_id → (role, created_at) — 30s single-use ticket.
+    sessions: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     validator: Arc<dyn BearerTokenValidator>,
     incoming_tx: mpsc::Sender<SignalRItem>,
 }
-
 // ─── transport ───────────────────────────────────────────────────────────────
 
 /// A combined HTTP-negotiate + WebSocket SignalR transport.
@@ -194,15 +195,13 @@ struct SignalRAxumState {
 ///    returns a one-time `connectionId`.
 /// 2. `GET /hub?id=<connectionId>` performs the WebSocket upgrade, runs the
 ///    SignalR handshake, then forwards every invocation (target must be `"rpc"`)
-///    into the stream returned by [`SignalRAxumTransport::get_incoming_stream`].
 pub struct SignalRAxumTransport {
-    sessions: Arc<Mutex<HashMap<String, String>>>,
+    sessions: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     validator: Arc<dyn BearerTokenValidator>,
     incoming_tx: mpsc::Sender<SignalRItem>,
     // std::sync::Mutex so extraction is synchronous and doesn't borrow self into the stream.
     incoming_rx: std::sync::Mutex<Option<mpsc::Receiver<SignalRItem>>>,
 }
-
 impl SignalRAxumTransport {
     /// Creates a SignalR transport backed by the supplied bearer-token validator.
     pub fn new(validator: Arc<dyn BearerTokenValidator>, buffer: usize) -> Self {
@@ -269,11 +268,12 @@ async fn handle_negotiate(
         }
     };
     let connection_id = Uuid::new_v4().to_string();
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(connection_id.clone(), role);
+    let mut sessions = state.sessions.lock().await;
+    // Prune sessions older than 30 seconds to prevent unbounded growth.
+    let now = Instant::now();
+    sessions.retain(|_, (_, created)| now.duration_since(*created) < Duration::from_secs(30));
+    sessions.insert(connection_id.clone(), (role, now));
+    drop(sessions);
     Json(SignalRNegotiateResponse {
         connection_id,
         url: None,
@@ -293,10 +293,9 @@ async fn handle_ws_upgrade(
         None => return (StatusCode::BAD_REQUEST, "Missing id query parameter").into_response(),
     };
     let role = match state.sessions.lock().await.remove(&connection_id) {
-        Some(r) => r,
-        None => {
-            return (StatusCode::UNAUTHORIZED, "Unknown or expired connection id").into_response();
-        }
+        Some((r, created)) if Instant::now().duration_since(created) < Duration::from_secs(30) => r,
+        Some(_) => return (StatusCode::UNAUTHORIZED, "Connection id has expired").into_response(),
+        None => return (StatusCode::UNAUTHORIZED, "Unknown connection id").into_response(),
     };
     ws.on_upgrade(move |socket| handle_socket(socket, role, state.incoming_tx.clone()))
 }
@@ -321,18 +320,19 @@ async fn handle_socket(socket: WebSocket, role: String, incoming_tx: mpsc::Sende
     }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<SignalROutgoing>();
-
+    // Close connection if no activity for 60 seconds (prevents zombie/leaked connections).
     loop {
         tokio::select! {
-            msg = read.next() => {
+            msg = timeout(TokioDuration::from_secs(60), read.next()) => {
                 match msg {
-                    Some(Ok(msg)) => {
+                    Ok(Some(Ok(msg))) => {
                         let text = message_to_str(&msg);
                         for record in text.split('\x1e').filter(|s| !s.trim().is_empty()) {
                             dispatch_record(record, &role, &incoming_tx, &out_tx).await;
                         }
                     }
-                    _ => break,
+                    Ok(None) | Ok(Some(Err(_))) => break, // connection closed or error
+                    Err(_) => break, // 60s inactivity timeout
                 }
             }
             outgoing = out_rx.recv() => {
@@ -472,6 +472,7 @@ fn encode_outgoing(msg: SignalROutgoing) -> String {
             }
             obj
         }
+        SignalROutgoing::Pong => serde_json::json!({ "type": 6 }),
     };
     format!("{json}\x1e")
 }

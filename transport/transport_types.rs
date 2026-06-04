@@ -66,6 +66,9 @@ pub trait UnaryCodec {
 
     /// Encode value of type T into bytes
     fn encode<T: Serialize>(value: &T) -> Result<Payload>;
+
+    /// MIME type to use in the HTTP Content-Type header for this codec.
+    fn content_type() -> &'static str where Self: Sized { "application/json" }
 }
 
 /// Helper trait for values that can be encoded with a [`UnaryCodec`].

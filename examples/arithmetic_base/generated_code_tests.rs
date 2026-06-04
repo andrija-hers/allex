@@ -581,12 +581,11 @@ async fn admin_cannot_call_mul() {
     )
     .await;
 
-    let execution::Response::Error(p) = response else {
-        panic!("expected Error response");
+    // Agent Change 06/04/2026: Updated pattern from Response::Error(payload)+decode to Response::TransportError(err)
+    // because AccessForbidden is now a TransportError variant, not an app-error payload.
+    let execution::Response::TransportError(err) = response else {
+        panic!("expected TransportError response");
     };
-    let err = p
-        .decode::<transport::JsonCodec, transport::Error>()
-        .unwrap();
     assert!(
         matches!(err, transport::Error::AccessForbidden),
         "expected AccessForbidden, got {err:?}"

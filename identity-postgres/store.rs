@@ -1,4 +1,8 @@
-use std::future::Future;
+use std::{
+    collections::HashSet,
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use allex_postgres::Db;
 use bcrypt::{DEFAULT_COST, hash, verify};
@@ -7,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use transport::BearerTokenValidator;
 
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, RegisterRequest, RoleResponse, TokenResponse,
-    ValidateRequest,
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RegisterRequest,
+    RoleResponse, TokenResponse, ValidateRequest,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -23,12 +27,15 @@ struct Claims {
 /// Persists users in a `users` table. Call [`PostgresIdentityStore::setup`]
 /// once at startup to create the table if it does not already exist.
 ///
-/// Implements both [`IdentityV1`] (register / login / validate) and
+/// Implements both [`IdentityV1`] (register / login / validate / logout) and
 /// [`BearerTokenValidator`] (synchronous JWT check used by transports).
 #[derive(Clone)]
 pub struct PostgresIdentityStore {
     db: Db,
     secret: String,
+    /// In-memory blacklist of revoked tokens. Cleared on restart (acceptable since
+    /// all JWTs expire after 1 hour). Shared across clones via Arc.
+    revoked_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 impl PostgresIdentityStore {
@@ -37,6 +44,7 @@ impl PostgresIdentityStore {
         Self {
             db,
             secret: secret.into(),
+            revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -76,11 +84,7 @@ impl PostgresIdentityStore {
             .unwrap()
             .as_secs() as usize
             + 3600;
-        let claims = Claims {
-            sub: sub.to_string(),
-            role: role.to_string(),
-            exp,
-        };
+        let claims = Claims { sub: sub.to_string(), role: role.to_string(), exp };
         encode(
             &Header::default(),
             &claims,
@@ -111,14 +115,12 @@ impl IdentityV1 for PostgresIdentityStore {
 
             let client = db.get_client().await.map_err(db_err)?;
 
-            // INSERT … ON CONFLICT DO NOTHING lets us check handle uniqueness
-            // and insert in one roundtrip; an empty RETURNING means it was taken.
             let rows = client
                 .query(
                     "INSERT INTO users (handle, password_hash, role)
                      VALUES ($1, $2, $3)
                      ON CONFLICT (handle) DO NOTHING
-                     RETURNING handle",
+                     RETURNING handle, role",
                     &[&req.handle, &password_hash, &req.role],
                 )
                 .await
@@ -128,9 +130,16 @@ impl IdentityV1 for PostgresIdentityStore {
                 return Err(IdentityError::HandleAlreadyTaken);
             }
 
-            let store = PostgresIdentityStore { db, secret };
-            let token = store.issue_jwt(&req.handle, &req.role)?;
-            Ok(TokenResponse { token })
+            let handle: String = rows[0].try_get("handle").map_err(db_err)?;
+            let role: String = rows[0].try_get("role").map_err(db_err)?;
+
+            let store = PostgresIdentityStore {
+                db,
+                secret,
+                revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+            };
+            let token = store.issue_jwt(&handle, &role)?;
+            Ok(TokenResponse { token, handle, role })
         }
     }
 
@@ -166,9 +175,13 @@ impl IdentityV1 for PostgresIdentityStore {
                 return Err(IdentityError::InvalidCredentials);
             }
 
-            let store = PostgresIdentityStore { db, secret };
+            let store = PostgresIdentityStore {
+                db,
+                secret,
+                revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+            };
             let token = store.issue_jwt(&req.handle, &role)?;
-            Ok(TokenResponse { token })
+            Ok(TokenResponse { token, handle: req.handle, role })
         }
     }
 
@@ -188,10 +201,32 @@ impl IdentityV1 for PostgresIdentityStore {
             Ok(RoleResponse { role: claims.role })
         }
     }
+
+    fn logout(
+        &self,
+        req: LogoutRequest,
+    ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
+        let revoked = self.revoked_tokens.clone();
+        async move {
+            revoked
+                .lock()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?
+                .insert(req.token);
+            Ok(LogoutResponse {})
+        }
+    }
 }
 
 impl BearerTokenValidator for PostgresIdentityStore {
     fn validate_bearer(&self, token: &str) -> Option<String> {
+        let is_revoked = self
+            .revoked_tokens
+            .lock()
+            .map(|set| set.contains(token))
+            .unwrap_or(false);
+        if is_revoked {
+            return None;
+        }
         self.decode_jwt(token).map(|c| c.role)
     }
 }

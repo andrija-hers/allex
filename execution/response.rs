@@ -11,6 +11,9 @@ pub enum Response {
     Progress(Payload),
     /// Application-level error payload.
     Error(Payload),
+    // Agent Change 06/04/2026: Added TransportError variant so auth rejections bypass app-error decoding and flow as transport-level Err.
+    /// Transport-level error (e.g. AccessForbidden) — bypasses app-error decoding.
+    TransportError(Error),
 }
 
 /// Turns decoded requests into server-side [`Response`] values.
@@ -48,8 +51,9 @@ where
 
         match response {
             Response::Success(v) | Response::Progress(v) => Ok(v),
-
             Response::Error(err) => Err(Error::App(err)),
+            // Agent Change 06/04/2026: Pass TransportError through directly rather than wrapping as App error.
+            Response::TransportError(err) => Err(err),
         }
     }
 }

@@ -27,12 +27,27 @@ pub struct ValidateRequest {
     pub token: String,
 }
 
+/// Request payload for invalidating a JWT (logout).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutRequest {
+    /// The bearer token to revoke.
+    pub token: String,
+}
+
 /// Response payload containing a newly issued JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     /// Encoded JWT.
     pub token: String,
+    /// Authenticated user handle.
+    pub handle: String,
+    /// Role assigned to the user.
+    pub role: String,
 }
+
+/// Response payload for a successful logout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutResponse {}
 
 /// Response payload containing the validated caller role.
 #[derive(Debug, Clone, Serialize, Deserialize)]

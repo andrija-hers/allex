@@ -30,4 +30,10 @@ pub trait IdentityV1 {
         &self,
         req: ValidateRequest,
     ) -> impl std::future::Future<Output = Result<RoleResponse, IdentityError>> + Send;
+
+    /// Revokes a JWT so it is rejected on all subsequent requests.
+    fn logout(
+        &self,
+        req: LogoutRequest,
+    ) -> impl std::future::Future<Output = Result<LogoutResponse, IdentityError>> + Send;
 }

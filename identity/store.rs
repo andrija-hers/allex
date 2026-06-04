@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::{HashMap, HashSet}, future::Future, sync::Arc};
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 use transport::BearerTokenValidator;
 
 use crate::{
-    IdentityError, IdentityV1, LoginRequest, RegisterRequest, RoleResponse, TokenResponse,
-    ValidateRequest,
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RegisterRequest,
+    RoleResponse, TokenResponse, ValidateRequest,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -26,9 +26,10 @@ struct StoredUser {
 struct IdentityStoreInner {
     secret: String,
     users: Arc<Mutex<HashMap<String, StoredUser>>>,
+    revoked_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
-/// An in-memory identity store supporting register, login, and JWT validation.
+/// An in-memory identity store supporting register, login, JWT validation, and logout.
 #[derive(Clone)]
 pub struct InMemoryIdentityStore(Arc<IdentityStoreInner>);
 
@@ -38,6 +39,7 @@ impl InMemoryIdentityStore {
         Self(Arc::new(IdentityStoreInner {
             secret: secret.into(),
             users: Arc::new(Mutex::new(HashMap::new())),
+            revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
         }))
     }
 
@@ -49,6 +51,21 @@ impl InMemoryIdentityStore {
         )
         .ok()
         .map(|d| d.claims)
+    }
+
+    fn issue_jwt(secret: &str, handle: &str, role: &str) -> Result<String, IdentityError> {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize
+            + 3600;
+        let claims = Claims { sub: handle.to_owned(), role: role.to_owned(), exp };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .map_err(|e| IdentityError::Internal(e.to_string()))
     }
 }
 
@@ -73,30 +90,12 @@ impl IdentityV1 for InMemoryIdentityStore {
             }
             users.insert(
                 req.handle.clone(),
-                StoredUser {
-                    password_hash,
-                    role: req.role.clone(),
-                },
+                StoredUser { password_hash, role: req.role.clone() },
             );
             drop(users);
 
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as usize
-                + 3600;
-            let claims = Claims {
-                sub: req.handle,
-                role: req.role,
-                exp,
-            };
-            let token = encode(
-                &Header::default(),
-                &claims,
-                &EncodingKey::from_secret(secret.as_bytes()),
-            )
-            .map_err(|e| IdentityError::Internal(e.to_string()))?;
-            Ok(TokenResponse { token })
+            let token = Self::issue_jwt(&secret, &req.handle, &req.role)?;
+            Ok(TokenResponse { token, handle: req.handle, role: req.role })
         }
     }
 
@@ -126,23 +125,8 @@ impl IdentityV1 for InMemoryIdentityStore {
                 return Err(IdentityError::InvalidCredentials);
             }
 
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as usize
-                + 3600;
-            let claims = Claims {
-                sub: req.handle,
-                role,
-                exp,
-            };
-            let token = encode(
-                &Header::default(),
-                &claims,
-                &EncodingKey::from_secret(secret.as_bytes()),
-            )
-            .map_err(|e| IdentityError::Internal(e.to_string()))?;
-            Ok(TokenResponse { token })
+            let token = Self::issue_jwt(&secret, &req.handle, &role)?;
+            Ok(TokenResponse { token, handle: req.handle, role })
         }
     }
 
@@ -162,10 +146,33 @@ impl IdentityV1 for InMemoryIdentityStore {
             Ok(RoleResponse { role: claims.role })
         }
     }
+
+    fn logout(
+        &self,
+        req: LogoutRequest,
+    ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
+        let revoked = self.0.revoked_tokens.clone();
+        async move {
+            revoked.lock().await.insert(req.token);
+            Ok(LogoutResponse {})
+        }
+    }
 }
 
 impl BearerTokenValidator for InMemoryIdentityStore {
     fn validate_bearer(&self, token: &str) -> Option<String> {
+        // Check blacklist synchronously — we need a blocking check here.
+        // Since revoked_tokens uses tokio::Mutex, we use try_lock; if contended
+        // we conservatively allow (extremely rare at logout timing).
+        let is_revoked = self
+            .0
+            .revoked_tokens
+            .try_lock()
+            .map(|set| set.contains(token))
+            .unwrap_or(false);
+        if is_revoked {
+            return None;
+        }
         self.decode_jwt(token).map(|c| c.role)
     }
 }

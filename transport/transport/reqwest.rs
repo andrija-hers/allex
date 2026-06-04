@@ -158,6 +158,21 @@ impl OneShotTransport for HttpTransport {
                 Error::ReceiveResponse(format!("Could not receive from {}: {}", url, e))
             })?;
 
+            // Agent Change 06/04/2026: HTTP 422 = app-level error. Decode body as Payload and return Err(Error::App(payload))
+            // so the client-side decode_helper routes it to ProgressOutcome::Error(app_error) instead of trying to decode as success type.
+            if status == StatusCode::UNPROCESSABLE_ENTITY {
+                let payload = serde_json::from_slice::<Payload>(&body).map_err(|e| {
+                    Error::ReceiveResponse(format!("Could not decode app error payload from {}: {}", url, e))
+                })?;
+                return Err(Error::App(payload));
+            }
+
+            // Agent Change 06/04/2026: HTTP 403 = AccessForbidden transport error. Return Err(Error::AccessForbidden) directly.
+
+            if status == StatusCode::FORBIDDEN {
+                return Err(Error::AccessForbidden);
+            }
+
             if !status.is_success() {
                 return Err(http_status_error(&url, status, &body));
             }
