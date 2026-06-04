@@ -1,11 +1,12 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, RegisterRequest, RoleResponse, TokenResponse,
-    ValidateRequest,
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RegisterRequest,
+    RoleResponse, TokenResponse, ValidateRequest,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use redb::{Database, ReadableTable, TableDefinition};
@@ -47,6 +48,7 @@ pub enum RedbIdentityStoreError {
 pub struct RedbIdentityStore {
     database: Arc<Database>,
     secret: String,
+    revoked_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RedbIdentityStore {
@@ -69,6 +71,7 @@ impl RedbIdentityStore {
         Ok(Self {
             database: Arc::new(database),
             secret: secret.into(),
+            revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -124,6 +127,7 @@ impl IdentityV1 for RedbIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let database = self.database.clone();
         let secret = self.secret.clone();
+        let revoked_tokens = self.revoked_tokens.clone();
         async move {
             let password = req.password.clone();
             let password_hash = tokio::task::spawn_blocking(move || {
@@ -169,9 +173,17 @@ impl IdentityV1 for RedbIdentityStore {
             .await
             .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
-            let store = RedbIdentityStore { database, secret };
+            let store = RedbIdentityStore {
+                database,
+                secret,
+                revoked_tokens,
+            };
             let token = store.issue_jwt(&req.handle, &req.role)?;
-            Ok(TokenResponse { token })
+            Ok(TokenResponse {
+                token,
+                handle: req.handle,
+                role: req.role,
+            })
         }
     }
 
@@ -181,6 +193,7 @@ impl IdentityV1 for RedbIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let database = self.database.clone();
         let secret = self.secret.clone();
+        let revoked_tokens = self.revoked_tokens.clone();
         async move {
             let handle = req.handle.clone();
             let database_for_read = database.clone();
@@ -216,9 +229,18 @@ impl IdentityV1 for RedbIdentityStore {
                 return Err(IdentityError::InvalidCredentials);
             }
 
-            let store = RedbIdentityStore { database, secret };
-            let token = store.issue_jwt(&req.handle, &stored.role)?;
-            Ok(TokenResponse { token })
+            let role = stored.role;
+            let store = RedbIdentityStore {
+                database,
+                secret,
+                revoked_tokens,
+            };
+            let token = store.issue_jwt(&req.handle, &role)?;
+            Ok(TokenResponse {
+                token,
+                handle: req.handle,
+                role,
+            })
         }
     }
 
@@ -238,10 +260,32 @@ impl IdentityV1 for RedbIdentityStore {
             Ok(RoleResponse { role: claims.role })
         }
     }
+
+    fn logout(
+        &self,
+        req: LogoutRequest,
+    ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
+        let revoked = self.revoked_tokens.clone();
+        async move {
+            revoked
+                .lock()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?
+                .insert(req.token);
+            Ok(LogoutResponse {})
+        }
+    }
 }
 
 impl BearerTokenValidator for RedbIdentityStore {
     fn validate_bearer(&self, token: &str) -> Option<String> {
+        let is_revoked = self
+            .revoked_tokens
+            .lock()
+            .map(|set| set.contains(token))
+            .unwrap_or(false);
+        if is_revoked {
+            return None;
+        }
         self.decode_jwt(token).map(|c| c.role)
     }
 }

@@ -7,7 +7,9 @@
 //! ```
 
 use allex_identity_redb::RedbIdentityStore;
-use identity::{IdentityError, IdentityV1, LoginRequest, RegisterRequest, ValidateRequest};
+use identity::{
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, RegisterRequest, ValidateRequest,
+};
 use tempfile::tempdir;
 use transport::BearerTokenValidator;
 
@@ -119,6 +121,19 @@ async fn validate_bearer_valid_token_returns_role() {
 async fn validate_bearer_invalid_token_returns_none() {
     let (store, _dir) = start_store().await;
     assert_eq!(store.validate_bearer("garbage.token.data"), None);
+}
+
+#[tokio::test]
+async fn logout_revokes_token_for_bearer_validation() {
+    let (store, _dir) = start_store().await;
+    let resp = store.register(reg("grace", "password")).await.unwrap();
+    store
+        .logout(LogoutRequest {
+            token: resp.token.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.validate_bearer(&resp.token), None);
 }
 
 #[tokio::test]
