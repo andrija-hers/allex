@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, HashSet}, future::Future, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+};
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -59,7 +63,11 @@ impl InMemoryIdentityStore {
             .unwrap()
             .as_secs() as usize
             + 3600;
-        let claims = Claims { sub: handle.to_owned(), role: role.to_owned(), exp };
+        let claims = Claims {
+            sub: handle.to_owned(),
+            role: role.to_owned(),
+            exp,
+        };
         encode(
             &Header::default(),
             &claims,
@@ -90,12 +98,19 @@ impl IdentityV1 for InMemoryIdentityStore {
             }
             users.insert(
                 req.handle.clone(),
-                StoredUser { password_hash, role: req.role.clone() },
+                StoredUser {
+                    password_hash,
+                    role: req.role.clone(),
+                },
             );
             drop(users);
 
             let token = Self::issue_jwt(&secret, &req.handle, &req.role)?;
-            Ok(TokenResponse { token, handle: req.handle, role: req.role })
+            Ok(TokenResponse {
+                token,
+                handle: req.handle,
+                role: req.role,
+            })
         }
     }
 
@@ -126,7 +141,11 @@ impl IdentityV1 for InMemoryIdentityStore {
             }
 
             let token = Self::issue_jwt(&secret, &req.handle, &role)?;
-            Ok(TokenResponse { token, handle: req.handle, role })
+            Ok(TokenResponse {
+                token,
+                handle: req.handle,
+                role,
+            })
         }
     }
 

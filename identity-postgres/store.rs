@@ -84,7 +84,11 @@ impl PostgresIdentityStore {
             .unwrap()
             .as_secs() as usize
             + 3600;
-        let claims = Claims { sub: sub.to_string(), role: role.to_string(), exp };
+        let claims = Claims {
+            sub: sub.to_string(),
+            role: role.to_string(),
+            exp,
+        };
         encode(
             &Header::default(),
             &claims,
@@ -139,7 +143,11 @@ impl IdentityV1 for PostgresIdentityStore {
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&handle, &role)?;
-            Ok(TokenResponse { token, handle, role })
+            Ok(TokenResponse {
+                token,
+                handle,
+                role,
+            })
         }
     }
 
@@ -181,7 +189,11 @@ impl IdentityV1 for PostgresIdentityStore {
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&req.handle, &role)?;
-            Ok(TokenResponse { token, handle: req.handle, role })
+            Ok(TokenResponse {
+                token,
+                handle: req.handle,
+                role,
+            })
         }
     }
 
