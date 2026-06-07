@@ -158,13 +158,10 @@ impl OneShotTransport for HttpTransport {
                 Error::ReceiveResponse(format!("Could not receive from {}: {}", url, e))
             })?;
 
-            // Agent Change 06/04/2026: HTTP 422 = app-level error. Decode body as Payload and return Err(Error::App(payload))
-            // so the client-side decode_helper routes it to ProgressOutcome::Error(app_error) instead of trying to decode as success type.
+            // HTTP 422 = app-level error. New servers return the raw encoded app error bytes
+            // directly for readability; older servers wrap them in the transport Payload JSON shape.
             if status == StatusCode::UNPROCESSABLE_ENTITY {
-                let payload = serde_json::from_slice::<Payload>(&body).map_err(|e| {
-                    Error::ReceiveResponse(format!("Could not decode app error payload from {}: {}", url, e))
-                })?;
-                return Err(Error::App(payload));
+                return Err(Error::App(decode_app_error_body(&body)));
             }
 
             // Agent Change 06/04/2026: HTTP 403 = AccessForbidden transport error. Return Err(Error::AccessForbidden) directly.
@@ -256,6 +253,10 @@ fn http_status_error(url: &str, status: StatusCode, body: &[u8]) -> Error {
         status,
         body.trim()
     ))
+}
+
+fn decode_app_error_body(body: &[u8]) -> Payload {
+    serde_json::from_slice::<Payload>(body).unwrap_or_else(|_| Payload::new(body))
 }
 
 fn decode_call_response<C: UnaryCodec>(url: &str, bytes: &[u8]) -> Result<CallResponse> {
@@ -378,6 +379,82 @@ mod tests {
                 assert_eq!(payload.get_bytes(), br#"{"total":4}"#);
             }
             other => panic!("unexpected second frame: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decodes_raw_http_422_app_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/rpc",
+            post(|| async {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [("content-type", "application/json")],
+                    br#""InvalidCredentials""#.to_vec(),
+                )
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpTransport::new(&format!("http://{}", address));
+        let error = transport
+            .send_payload(Payload::new(b"ping"))
+            .await
+            .expect_err("request should fail");
+
+        server.abort();
+
+        match error {
+            Error::App(payload) => {
+                assert_eq!(payload.get_bytes(), br#""InvalidCredentials""#);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn decodes_legacy_http_422_payload_wrappers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let encoded_payload = JsonCodec::encode(&Payload::new(br#""InvalidCredentials""#))
+            .expect("payload should encode")
+            .get_bytes_forever();
+        let app = Router::new().route(
+            "/rpc",
+            post(move || {
+                let encoded_payload = encoded_payload.clone();
+                async move {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        [("content-type", "application/json")],
+                        encoded_payload,
+                    )
+                }
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpTransport::new(&format!("http://{}", address));
+        let error = transport
+            .send_payload(Payload::new(b"ping"))
+            .await
+            .expect_err("request should fail");
+
+        server.abort();
+
+        match error {
+            Error::App(payload) => {
+                assert_eq!(payload.get_bytes(), br#""InvalidCredentials""#);
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 

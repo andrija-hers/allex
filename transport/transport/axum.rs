@@ -1,10 +1,10 @@
 use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 
+use crate::BearerTokenValidator;
 use crate::transport::{
     IdentityTransportItem, ServerSideOneShotTransport, ServerSideOneShotTransportItem,
 };
 use crate::transport_types::*;
-use crate::BearerTokenValidator;
 use axum::body::{Body, Bytes};
 use axum::{
     extract::State,
@@ -110,7 +110,9 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
         let rx = match guard.take() {
             Some(rx) => rx,
             None => {
-                eprintln!("[axum] get_incoming_stream called more than once — returning empty stream");
+                eprintln!(
+                    "[axum] get_incoming_stream called more than once — returning empty stream"
+                );
                 let (_, rx) = mpsc::channel(1);
                 rx
             }
@@ -193,24 +195,17 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 Body::from_stream(stream.filter_map(|response| async move {
                     match encode_call_response::<C>(&response) {
                         Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
-                        Err(e) => { eprintln!("[axum] stream encode error: {e:?}"); None }
+                        Err(e) => {
+                            eprintln!("[axum] stream encode error: {e:?}");
+                            None
+                        }
                     }
                 })),
             )
                 .into_response(),
-            // Agent Change 06/04/2026: Maps AppError to HTTP 422 (Unprocessable Entity) so client can decode app-level errors.
-            AxumResponse::AppError(response_payload) => match C::encode(&response_payload) {
-                Ok(bytes) => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    [(CONTENT_TYPE, C::content_type())],
-                    bytes.get_bytes_forever(),
-                )
-                    .into_response(),
-                Err(err) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Could not encode app error payload: {err:?}"),
-                ),
-            },
+            // Return the encoded application error bytes directly so non-Rust HTTP clients
+            // see readable JSON instead of the transport's outer byte-array wrapper.
+            AxumResponse::AppError(response_payload) => app_error_response::<C>(response_payload),
             // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the unauthenticated handler.
             AxumResponse::TransportError(error) => match error {
                 Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
@@ -245,7 +240,10 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     pub fn router_with_auth(&self, validator: Arc<dyn BearerTokenValidator>) -> Router {
         Router::new()
             .route("/rpc", post(Self::handle_post_auth))
-            .with_state(AuthState { tx: self.tx.clone(), validator })
+            .with_state(AuthState {
+                tx: self.tx.clone(),
+                validator,
+            })
     }
 
     async fn handle_post_auth(
@@ -302,24 +300,19 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 Body::from_stream(stream.filter_map(|response| async move {
                     match encode_call_response::<C>(&response) {
                         Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
-                        Err(e) => { eprintln!("[axum] stream encode error: {e:?}"); None }
+                        Err(e) => {
+                            eprintln!("[axum] stream encode error: {e:?}");
+                            None
+                        }
                     }
                 })),
             )
                 .into_response(),
-            // Agent Change 06/04/2026: Maps AppError to HTTP 422 (Unprocessable Entity) in the authenticated handler so client can decode app-level errors.
-            Ok(AxumResponse::AppError(response_payload)) => match C::encode(&response_payload) {
-                Ok(bytes) => (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    [(CONTENT_TYPE, C::content_type())],
-                    bytes.get_bytes_forever(),
-                )
-                    .into_response(),
-                Err(err) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Could not encode app error payload: {err:?}"),
-                ),
-            },
+            // Return the encoded application error bytes directly so non-Rust HTTP clients
+            // see readable JSON instead of the transport's outer byte-array wrapper.
+            Ok(AxumResponse::AppError(response_payload)) => {
+                app_error_response::<C>(response_payload)
+            }
             // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the authenticated handler.
             Ok(AxumResponse::TransportError(error)) => match error {
                 Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
@@ -338,6 +331,15 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
 
 fn error_response(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
+}
+
+fn app_error_response<C: UnaryCodec>(payload: Payload) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        [(CONTENT_TYPE, C::content_type())],
+        payload.get_bytes_forever(),
+    )
+        .into_response()
 }
 
 fn encode_call_response<C: UnaryCodec>(response: &CallResponse) -> Result<Bytes> {
