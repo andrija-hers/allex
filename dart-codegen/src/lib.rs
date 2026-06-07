@@ -1,0 +1,1566 @@
+//! Parses Rust source files, finds every `#[rpc_module]` trait and every
+//! serialisable struct/enum, and renders Dart client classes + DTO types.
+
+use std::collections::{HashSet, VecDeque};
+use syn::{
+    AngleBracketedGenericArguments, Attribute, Fields, FnArg, GenericArgument,
+    ItemEnum, ItemStruct, ItemTrait, LitStr, PatType, PathArguments, ReturnType,
+    TraitItem, TraitItemFn, Type, TypeParamBound,
+};
+
+// ===========================================================================
+// Public RPC model (unchanged)
+// ===========================================================================
+
+/// All information extracted from one `#[rpc_module]` trait.
+pub struct RpcModuleInfo {
+    /// Original Rust trait name, e.g. `ActiveSchedulesV1`.
+    pub trait_name: String,
+    /// Wire module name, e.g. `active_schedules_v_1`.
+    pub module_name: String,
+    pub methods: Vec<MethodInfo>,
+}
+
+pub struct MethodInfo {
+    pub rust_name: String,
+    pub dart_name: String,
+    pub request_type: String,
+    pub kind: MethodKind,
+    pub is_public: bool,
+    pub allowed_roles: Vec<String>,
+}
+
+pub enum MethodKind {
+    Unary { success_type: String, error_type: String },
+    Streaming { progress_type: String, success_type: String, error_type: String },
+}
+
+// ===========================================================================
+// Public DTO model
+// ===========================================================================
+
+pub enum DtoInfo {
+    Struct(StructInfo),
+    Enum(EnumInfo),
+}
+
+pub struct StructInfo {
+    pub name: String,
+    pub fields: Vec<FieldInfo>,
+}
+
+/// A single field in a struct (or a struct-variant of an enum).
+pub struct FieldInfo {
+    /// Dart identifier (camelCase).
+    pub dart_name: String,
+    /// JSON key as serde would produce it.
+    pub json_name: String,
+    /// Dart type string, e.g. `"int?"`, `"List<Bar>"`.
+    pub dart_type: String,
+    /// True when the Rust type is `Option<T>`.
+    pub is_optional: bool,
+    pub skip: bool,
+}
+
+pub struct EnumInfo {
+    pub name: String,
+    pub repr: EnumRepr,
+    pub variants: Vec<VariantInfo>,
+}
+
+pub enum EnumRepr {
+    /// Default serde representation: unit variants → JSON string,
+    /// newtype/struct variants → `{"Name": payload}`.
+    External,
+    /// `#[serde(tag = "type")]`
+    Internal { tag: String },
+    /// `#[serde(untagged)]`
+    Untagged,
+}
+
+pub struct VariantInfo {
+    /// Wire name (after rename/rename_all).
+    pub json_name: String,
+    /// Suffix appended to the parent enum name for the Dart class,
+    /// e.g. `"Overflow"` → Dart class `ArithmeticErrorOverflow`.
+    pub dart_suffix: String,
+    pub kind: VariantKind,
+}
+
+pub enum VariantKind {
+    Unit,
+    Newtype { dart_type: String },
+    Struct { fields: Vec<FieldInfo> },
+}
+
+impl DtoInfo {
+    pub fn name(&self) -> &str {
+        match self {
+            DtoInfo::Struct(s) => &s.name,
+            DtoInfo::Enum(e) => &e.name,
+        }
+    }
+}
+
+// ===========================================================================
+// Internal: Dart type representation
+// ===========================================================================
+
+#[derive(Clone)]
+enum DartType {
+    Int,
+    Double,
+    Bool,
+    DartString,
+    Nullable(Box<DartType>),
+    List(Box<DartType>),
+    Map(Box<DartType>, Box<DartType>),
+    Custom(String),
+    Unknown(String),
+}
+
+impl DartType {
+    fn type_str(&self) -> String {
+        match self {
+            DartType::Int => "int".into(),
+            DartType::Double => "double".into(),
+            DartType::Bool => "bool".into(),
+            DartType::DartString => "String".into(),
+            DartType::Nullable(inner) => format!("{}?", inner.type_str()),
+            DartType::List(elem) => format!("List<{}>", elem.type_str()),
+            DartType::Map(k, v) => format!("Map<{}, {}>", k.type_str(), v.type_str()),
+            DartType::Custom(name) => name.clone(),
+            DartType::Unknown(name) => format!("dynamic /* {name} */"),
+        }
+    }
+
+    /// Expression that decodes a `dynamic` Dart value `src` into this type.
+    fn decode(&self, src: &str) -> String {
+        match self {
+            DartType::Int => format!("({src} as num).toInt()"),
+            DartType::Double => format!("({src} as num).toDouble()"),
+            DartType::Bool => format!("{src} as bool"),
+            DartType::DartString => format!("{src} as String"),
+            DartType::Nullable(inner) => match inner.as_ref() {
+                DartType::Int => format!("({src} as num?)?.toInt()"),
+                DartType::Double => format!("({src} as num?)?.toDouble()"),
+                DartType::Bool => format!("{src} as bool?"),
+                DartType::DartString => format!("{src} as String?"),
+                inner => {
+                    let inner_dec = inner.decode(src);
+                    format!("{src} == null ? null : {inner_dec}")
+                }
+            },
+            DartType::List(elem) => {
+                let elem_dec = elem.decode("_e");
+                format!("({src} as List).map((_e) => {elem_dec}).toList()")
+            }
+            DartType::Map(_, val) => {
+                let val_dec = val.decode("_v");
+                format!("({src} as Map<String, dynamic>).map((_k, _v) => MapEntry(_k, {val_dec}))")
+            }
+            DartType::Custom(name) => format!("{name}.fromJson({src})"),
+            DartType::Unknown(_) => src.to_string(),
+        }
+    }
+
+    /// Expression that encodes a Dart value `val` of this type to JSON.
+    fn encode(&self, val: &str) -> String {
+        match self {
+            DartType::Int | DartType::Double | DartType::Bool | DartType::DartString => {
+                val.to_string()
+            }
+            DartType::Nullable(inner) => match inner.as_ref() {
+                DartType::Int | DartType::Double | DartType::Bool | DartType::DartString => {
+                    val.to_string()
+                }
+                DartType::Custom(_) => format!("{val}?.toJson()"),
+                inner => {
+                    let inner_enc = inner.encode(&format!("{val}!"));
+                    format!("{val} == null ? null : {inner_enc}")
+                }
+            },
+            DartType::List(elem) => {
+                let elem_enc = elem.encode("_e");
+                if elem_enc == "_e" {
+                    val.to_string()
+                } else {
+                    format!("{val}.map((_e) => {elem_enc}).toList()")
+                }
+            }
+            DartType::Map(_, v_ty) => {
+                let v_enc = v_ty.encode("_v");
+                if v_enc == "_v" {
+                    val.to_string()
+                } else {
+                    format!("{val}.map((_k, _v) => MapEntry(_k, {v_enc}))")
+                }
+            }
+            DartType::Custom(_) => format!("{val}.toJson()"),
+            DartType::Unknown(_) => val.to_string(),
+        }
+    }
+
+    fn is_nullable(&self) -> bool {
+        matches!(self, DartType::Nullable(_))
+    }
+}
+
+// ===========================================================================
+// Internal: serde attribute parsing
+// ===========================================================================
+
+#[derive(Default)]
+struct SerdeAttrs {
+    rename_all: Option<String>,
+    rename: Option<String>,
+    skip: bool,
+    has_default: bool,
+    tag: Option<String>,
+    untagged: bool,
+}
+
+fn parse_serde_attrs(attrs: &[Attribute]) -> SerdeAttrs {
+    let mut out = SerdeAttrs::default();
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                let v = meta.value()?;
+                let s: LitStr = v.parse()?;
+                out.rename_all = Some(s.value());
+            } else if meta.path.is_ident("rename") {
+                let v = meta.value()?;
+                let s: LitStr = v.parse()?;
+                out.rename = Some(s.value());
+            } else if meta.path.is_ident("tag") {
+                let v = meta.value()?;
+                let s: LitStr = v.parse()?;
+                out.tag = Some(s.value());
+            } else if meta.path.is_ident("skip")
+                || meta.path.is_ident("skip_serializing")
+                || meta.path.is_ident("skip_deserializing")
+            {
+                out.skip = true;
+            } else if meta.path.is_ident("default") {
+                out.has_default = true;
+            } else if meta.path.is_ident("untagged") {
+                out.untagged = true;
+            } else {
+                // Unknown serde attr — consume any `= <expr>` to avoid parse errors.
+                if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                }
+            }
+            Ok(())
+        });
+    }
+    out
+}
+
+// ===========================================================================
+// Public entry points
+// ===========================================================================
+
+/// Parse a Rust source file and return every `#[rpc_module]` trait found in it.
+pub fn find_rpc_modules(source: &str) -> Vec<RpcModuleInfo> {
+    let file = match syn::parse_file(source) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Warning: failed to parse source: {e}");
+            return Vec::new();
+        }
+    };
+    file.items
+        .iter()
+        .filter_map(|item| {
+            if let syn::Item::Trait(t) = item {
+                if has_attr(&t.attrs, "rpc_module") {
+                    return extract_module_info(t);
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// Collect all type names referenced by methods in this module
+/// (request types, success/error/progress types).
+pub fn referenced_type_names(module: &RpcModuleInfo) -> Vec<String> {
+    let mut names: Vec<String> = module
+        .methods
+        .iter()
+        .flat_map(|m| {
+            let mut v = vec![m.request_type.clone()];
+            match &m.kind {
+                MethodKind::Unary { success_type, error_type } => {
+                    v.push(success_type.clone());
+                    v.push(error_type.clone());
+                }
+                MethodKind::Streaming { progress_type, success_type, error_type } => {
+                    v.push(progress_type.clone());
+                    v.push(success_type.clone());
+                    v.push(error_type.clone());
+                }
+            }
+            v
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Parse a Rust source file and return all serialisable struct/enum definitions.
+pub fn find_dto_types(source: &str) -> Vec<DtoInfo> {
+    let file = match syn::parse_file(source) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Warning: failed to parse source for DTOs: {e}");
+            return Vec::new();
+        }
+    };
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(s) => extract_struct(s),
+            syn::Item::Enum(e) => extract_enum(e),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Return the reachable subset of DTOs starting from `roots`, following
+/// field types transitively.  Types not found in `source` are treated as
+/// external and are not included in the output but are still followed
+/// (so their own fields don't prevent discovery of siblings).
+pub fn find_reachable_dtos(source: &str, roots: &[&str]) -> Vec<DtoInfo> {
+    let all = find_dto_types(source);
+    let index: std::collections::HashMap<&str, usize> =
+        all.iter().enumerate().map(|(i, d)| (d.name(), i)).collect();
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> =
+        roots.iter().map(|s| s.to_string()).collect();
+
+    while let Some(name) = queue.pop_front() {
+        if visited.contains(&name) {
+            continue;
+        }
+        visited.insert(name.clone());
+        if let Some(&idx) = index.get(name.as_str()) {
+            for dep in reachable_from_dto(&all[idx]) {
+                if !visited.contains(&dep) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+    }
+
+    // Return in original definition order.
+    all.into_iter()
+        .filter(|d| visited.contains(d.name()))
+        .collect()
+}
+
+/// Render a Dart client class for the given module.
+/// Always imports `{module_name}_dtos.dart` from the same directory.
+pub fn render_dart_client(module: &RpcModuleInfo) -> String {
+    let class_name = format!("{}Client", module.trait_name);
+    let dtos_import = format!("{}_dtos.dart", module.module_name);
+    let mut lines: Vec<String> = vec![
+        "// GENERATED by `cargo xtask dart-codegen` — do not edit manually.".into(),
+        format!("// Source trait: {}", module.trait_name),
+        String::new(),
+        "// ignore_for_file: lines_longer_than_80_chars".into(),
+        String::new(),
+        "import 'package:allex/allex.dart';".into(),
+        format!("import '{dtos_import}';"),
+        String::new(),
+        format!("/// Generated Dart client for [{}].", module.trait_name),
+        format!("class {class_name} {{"),
+        "  final AllexTransport transport;".into(),
+        format!("  const {class_name}(this.transport);"),
+    ];
+
+    for method in &module.methods {
+        lines.push(String::new());
+        if method.is_public {
+            lines.push("  /// Public — no authentication required.".into());
+        } else if !method.allowed_roles.is_empty() {
+            lines.push(format!("  /// Requires role: {}", method.allowed_roles.join(", ")));
+        } else {
+            lines.push("  /// Requires authentication.".into());
+        }
+
+        match &method.kind {
+            MethodKind::Unary { success_type, error_type } => {
+                lines.push(format!(
+                    "  Future<AllexResult<{success_type}, {error_type}>> {}(",
+                    method.dart_name
+                ));
+                lines.push(format!("    {} request,", method.request_type));
+                lines.push("  ) =>".into());
+                lines.push("    transport.callUnary(".into());
+                lines.push(format!("      module: '{}',", module.module_name));
+                lines.push(format!("      method: '{}',", method.rust_name));
+                lines.push("      request: request.toJson(),".into());
+                lines.push(format!("      decode: {success_type}.fromJson,"));
+                lines.push(format!("      decodeError: {error_type}.fromJson,"));
+                lines.push("    );".into());
+            }
+            MethodKind::Streaming { progress_type, success_type, error_type } => {
+                lines.push(format!(
+                    "  Stream<AllexStep<{progress_type}, {success_type}, {error_type}>> {}(",
+                    method.dart_name
+                ));
+                lines.push(format!("    {} request,", method.request_type));
+                lines.push("  ) =>".into());
+                lines.push("    transport.callStreaming(".into());
+                lines.push(format!("      module: '{}',", module.module_name));
+                lines.push(format!("      method: '{}',", method.rust_name));
+                lines.push("      request: request.toJson(),".into());
+                lines.push(format!("      decodeProgress: {progress_type}.fromJson,"));
+                lines.push(format!("      decodeSuccess: {success_type}.fromJson,"));
+                lines.push(format!("      decodeError: {error_type}.fromJson,"));
+                lines.push("    );".into());
+            }
+        }
+    }
+    lines.push("}".into());
+    lines.join("\n") + "\n"
+}
+
+/// Render a complete Dart file containing DTO classes for `dtos`.
+/// `extra_imports` are injected for types that come from outside the
+/// source file (hand-written models, other generated files, etc.).
+pub fn render_dart_dtos(
+    module_name: &str,
+    dtos: &[DtoInfo],
+    extra_imports: &[&str],
+) -> String {
+    let mut lines: Vec<String> = vec![
+        "// GENERATED by `cargo xtask dart-codegen` — do not edit manually.".into(),
+        format!("// DTOs for module: {module_name}"),
+        String::new(),
+        "// ignore_for_file: lines_longer_than_80_chars".into(),
+    ];
+
+    if !extra_imports.is_empty() {
+        lines.push(String::new());
+        for imp in extra_imports {
+            lines.push(format!("import '{imp}';"));
+        }
+    }
+
+    for dto in dtos {
+        lines.push(String::new());
+        lines.push(render_dto(dto));
+    }
+
+    lines.join("\n") + "\n"
+}
+
+// ===========================================================================
+// RPC extraction helpers
+// ===========================================================================
+
+fn extract_module_info(trait_item: &ItemTrait) -> Option<RpcModuleInfo> {
+    let trait_name = trait_item.ident.to_string();
+    let module_name = module_name_from_trait(&trait_name);
+    let methods = trait_item
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let TraitItem::Fn(m) = item {
+                match extract_method_info(m) {
+                    Some(info) => Some(info),
+                    None => {
+                        eprintln!(
+                            "Warning: skipping method `{}` — could not determine kind",
+                            m.sig.ident
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    Some(RpcModuleInfo { trait_name, module_name, methods })
+}
+
+fn extract_method_info(method: &TraitItemFn) -> Option<MethodInfo> {
+    let rust_name = method.sig.ident.to_string();
+    let dart_name = snake_to_camel(&rust_name);
+    let request_type = extract_request_type_name(method)?;
+    let kind = extract_method_kind(method)?;
+    let (is_public, allowed_roles) = extract_roles(&method.attrs);
+    Some(MethodInfo { rust_name, dart_name, request_type, kind, is_public, allowed_roles })
+}
+
+fn extract_request_type_name(method: &TraitItemFn) -> Option<String> {
+    method.sig.inputs.iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(PatType { ty, .. }) => Some(type_ident(ty)),
+            FnArg::Receiver(_) => None,
+        })
+        .next()
+}
+
+fn extract_method_kind(method: &TraitItemFn) -> Option<MethodKind> {
+    let return_ty = match &method.sig.output {
+        ReturnType::Type(_, ty) => ty.as_ref(),
+        ReturnType::Default => return None,
+    };
+
+    if method.sig.asyncness.is_some() {
+        let (s, e) = extract_result_types(return_ty)?;
+        return Some(MethodKind::Unary { success_type: s, error_type: e });
+    }
+
+    if let Some(types) = path_type_args(return_ty, "ProgressableFuture") {
+        if types.len() >= 3 {
+            return Some(MethodKind::Streaming {
+                progress_type: type_ident(&types[0]),
+                success_type: type_ident(&types[1]),
+                error_type: type_ident(&types[2]),
+            });
+        }
+    }
+
+    if let Type::ImplTrait(impl_trait) = return_ty {
+        for bound in &impl_trait.bounds {
+            if let TypeParamBound::Trait(tb) = bound {
+                if let Some(args) =
+                    angle_args_for_last_segment(tb.path.segments.last(), "Future")
+                {
+                    for arg in &args.args {
+                        if let GenericArgument::AssocType(assoc) = arg {
+                            if assoc.ident == "Output" {
+                                if let Some((s, e)) = extract_result_types(&assoc.ty) {
+                                    return Some(MethodKind::Unary {
+                                        success_type: s,
+                                        error_type: e,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((s, e)) = extract_result_types(return_ty) {
+        return Some(MethodKind::Unary { success_type: s, error_type: e });
+    }
+
+    None
+}
+
+fn extract_result_types(ty: &Type) -> Option<(String, String)> {
+    let types = path_type_args(ty, "Result")?;
+    if types.len() >= 2 {
+        Some((type_ident(&types[0]), type_ident(&types[1])))
+    } else {
+        None
+    }
+}
+
+fn path_type_args(ty: &Type, expected_ident: &str) -> Option<Vec<Type>> {
+    let Type::Path(tp) = ty else { return None; };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != expected_ident { return None; }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else { return None; };
+    Some(
+        args.args.iter()
+            .filter_map(|a| match a {
+                GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+fn angle_args_for_last_segment<'a>(
+    seg: Option<&'a syn::PathSegment>,
+    expected: &str,
+) -> Option<&'a AngleBracketedGenericArguments> {
+    let seg = seg?;
+    if seg.ident != expected { return None; }
+    match &seg.arguments {
+        PathArguments::AngleBracketed(args) => Some(args),
+        _ => None,
+    }
+}
+
+fn type_ident(ty: &Type) -> String {
+    match ty {
+        Type::Path(tp) => tp.path.segments.last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "Unknown".to_string()),
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn extract_roles(attrs: &[Attribute]) -> (bool, Vec<String>) {
+    if has_attr(attrs, "public") {
+        return (true, Vec::new());
+    }
+    let mut roles = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("allowed_roles") {
+            if let Ok(parsed) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated,
+            ) {
+                roles.extend(parsed.into_iter().map(|s| s.value()));
+            }
+        }
+    }
+    (false, roles)
+}
+
+fn has_attr(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
+
+// ===========================================================================
+// DTO extraction helpers
+// ===========================================================================
+
+fn has_derive(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("derive") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident(name)
+                || meta.path.segments.last().map(|s| s.ident == name).unwrap_or(false)
+            {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
+}
+
+fn extract_struct(item: &ItemStruct) -> Option<DtoInfo> {
+    if !has_derive(&item.attrs, "Serialize") && !has_derive(&item.attrs, "Deserialize") {
+        return None;
+    }
+    let name = item.ident.to_string();
+    let serde = parse_serde_attrs(&item.attrs);
+
+    let Fields::Named(named) = &item.fields else {
+        // Tuple structs and unit structs: skip for now.
+        return None;
+    };
+
+    let fields: Vec<FieldInfo> = named
+        .named
+        .iter()
+        .filter_map(|f| extract_field(f, serde.rename_all.as_deref()))
+        .collect();
+
+    Some(DtoInfo::Struct(StructInfo { name, fields }))
+}
+
+fn extract_field(
+    field: &syn::Field,
+    rename_all: Option<&str>,
+) -> Option<FieldInfo> {
+    let rust_name = field.ident.as_ref()?.to_string();
+    let serde = parse_serde_attrs(&field.attrs);
+
+    if serde.skip {
+        // Keep the field in the model (so callers know to skip it),
+        // but mark it skipped.
+        let json_name = serde.rename.clone()
+            .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+        let dart_name = snake_to_camel(&rust_name);
+        return Some(FieldInfo {
+            dart_name,
+            json_name,
+            dart_type: "dynamic".into(),
+            is_optional: false,
+            skip: true,
+        });
+    }
+
+    let dart_ty = rust_type_to_dart(&field.ty);
+    let is_optional = dart_ty.is_nullable();
+    let json_name = serde.rename.clone()
+        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+    let dart_name = snake_to_camel(&rust_name);
+
+    Some(FieldInfo {
+        dart_name,
+        json_name,
+        dart_type: dart_ty.type_str(),
+        is_optional,
+        skip: false,
+    })
+}
+
+fn extract_enum(item: &ItemEnum) -> Option<DtoInfo> {
+    if !has_derive(&item.attrs, "Serialize") && !has_derive(&item.attrs, "Deserialize") {
+        return None;
+    }
+    let name = item.ident.to_string();
+    let serde = parse_serde_attrs(&item.attrs);
+
+    let repr = if serde.untagged {
+        EnumRepr::Untagged
+    } else if let Some(tag) = serde.tag {
+        EnumRepr::Internal { tag }
+    } else {
+        EnumRepr::External
+    };
+
+    let variants: Vec<VariantInfo> = item
+        .variants
+        .iter()
+        .filter_map(|v| extract_variant(v, serde.rename_all.as_deref(), &name))
+        .collect();
+
+    Some(DtoInfo::Enum(EnumInfo { name, repr, variants }))
+}
+
+fn extract_variant(
+    variant: &syn::Variant,
+    rename_all: Option<&str>,
+    parent_name: &str,
+) -> Option<VariantInfo> {
+    let rust_name = variant.ident.to_string();
+    let serde = parse_serde_attrs(&variant.attrs);
+    if serde.skip {
+        return None;
+    }
+
+    let json_name = serde.rename
+        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+    let dart_suffix = rust_name.clone();
+
+    let kind = match &variant.fields {
+        Fields::Unit => VariantKind::Unit,
+        Fields::Unnamed(u) if u.unnamed.len() == 1 => {
+            let dart_ty = rust_type_to_dart(&u.unnamed[0].ty);
+            VariantKind::Newtype { dart_type: dart_ty.type_str() }
+        }
+        Fields::Named(named) => {
+            let fields = named
+                .named
+                .iter()
+                .filter_map(|f| extract_field(f, None))
+                .collect();
+            VariantKind::Struct { fields }
+        }
+        _ => {
+            // Tuple variants with multiple fields: not supported, skip.
+            eprintln!(
+                "Warning: {parent_name}::{rust_name} — tuple variants with >1 \
+                 field are not supported; skipping"
+            );
+            return None;
+        }
+    };
+
+    Some(VariantInfo { json_name, dart_suffix, kind })
+}
+
+/// Collect all custom type names directly referenced by a DTO's fields.
+fn reachable_from_dto(dto: &DtoInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    match dto {
+        DtoInfo::Struct(s) => {
+            for f in s.fields.iter().filter(|f| !f.skip) {
+                collect_custom_from_type_str(&f.dart_type, &mut out);
+            }
+        }
+        DtoInfo::Enum(e) => {
+            for v in &e.variants {
+                match &v.kind {
+                    VariantKind::Newtype { dart_type } => {
+                        collect_custom_from_type_str(dart_type, &mut out);
+                    }
+                    VariantKind::Struct { fields } => {
+                        for f in fields.iter().filter(|f| !f.skip) {
+                            collect_custom_from_type_str(&f.dart_type, &mut out);
+                        }
+                    }
+                    VariantKind::Unit => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extract custom (non-primitive) type names from a Dart type string like
+/// `"List<Foo>"`, `"Bar?"`, `"Map<String, Baz>"`.
+fn collect_custom_from_type_str(dart_type: &str, out: &mut Vec<String>) {
+    // Strip all generic/nullable punctuation and split on delimiters.
+    let clean = dart_type
+        .replace(['<', '>', '?', ' '], ",")
+        .replace("List,", "")
+        .replace("Map,", "");
+    for part in clean.split(',') {
+        let t = part.trim();
+        if t.is_empty() { continue; }
+        if matches!(t, "int" | "double" | "bool" | "String" | "dynamic" | "void") {
+            continue;
+        }
+        // Strip `/* ... */` comments from Unknown types.
+        if t.starts_with("/*") { continue; }
+        out.push(t.to_string());
+    }
+}
+
+// ===========================================================================
+// DTO rendering
+// ===========================================================================
+
+fn render_dto(dto: &DtoInfo) -> String {
+    match dto {
+        DtoInfo::Struct(s) => render_struct(s),
+        DtoInfo::Enum(e) => render_enum(e),
+    }
+}
+
+fn render_struct(s: &StructInfo) -> String {
+    let active: Vec<&FieldInfo> = s.fields.iter().filter(|f| !f.skip).collect();
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("class {} {{", s.name));
+
+    // Field declarations.
+    for f in &active {
+        lines.push(format!("  final {} {};", f.dart_type, f.dart_name));
+    }
+
+    // Constructor.
+    if active.is_empty() {
+        lines.push(format!("  const {}();", s.name));
+    } else {
+        lines.push(format!("  const {}({{", s.name));
+        for f in &active {
+            if f.is_optional {
+                lines.push(format!("    this.{},", f.dart_name));
+            } else {
+                lines.push(format!("    required this.{},", f.dart_name));
+            }
+        }
+        lines.push("  });".into());
+    }
+
+    // fromJson factory.
+    lines.push(String::new());
+    lines.push(format!("  factory {}.fromJson(dynamic json) {{", s.name));
+    if active.is_empty() {
+        lines.push(format!("    return {}();", s.name));
+    } else {
+        lines.push("    final map = json as Map<String, dynamic>;".into());
+        lines.push(format!("    return {}(", s.name));
+        for f in &active {
+            let dart_ty = restore_dart_type(&f.dart_type);
+            let raw = format!("map['{}']", f.json_name);
+            let decoded = dart_ty.decode(&raw);
+            lines.push(format!("      {}: {decoded},", f.dart_name));
+        }
+        lines.push("    );".into());
+    }
+    lines.push("  }".into());
+
+    // toJson method.
+    lines.push(String::new());
+    lines.push("  Map<String, dynamic> toJson() => {".into());
+    for f in &active {
+        let dart_ty = restore_dart_type(&f.dart_type);
+        let encoded = dart_ty.encode(&f.dart_name);
+        lines.push(format!("    '{}': {encoded},", f.json_name));
+    }
+    lines.push("  };".into());
+    lines.push("}".into());
+
+    lines.join("\n")
+}
+
+fn render_enum(e: &EnumInfo) -> String {
+    match &e.repr {
+        EnumRepr::External => render_enum_external(e),
+        EnumRepr::Internal { tag } => render_enum_internal(e, tag),
+        EnumRepr::Untagged => render_enum_untagged(e),
+    }
+}
+
+fn render_enum_external(e: &EnumInfo) -> String {
+    let unit_variants: Vec<&VariantInfo> = e.variants.iter()
+        .filter(|v| matches!(v.kind, VariantKind::Unit))
+        .collect();
+    let complex_variants: Vec<&VariantInfo> = e.variants.iter()
+        .filter(|v| !matches!(v.kind, VariantKind::Unit))
+        .collect();
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Sealed parent class.
+    lines.push(format!("sealed class {} {{", e.name));
+    lines.push(format!("  const {}();", e.name));
+    lines.push(String::new());
+    lines.push(format!("  factory {}.fromJson(dynamic json) {{", e.name));
+
+    if !unit_variants.is_empty() {
+        lines.push("    if (json is String) {".into());
+        lines.push("      return switch (json) {".into());
+        for v in &unit_variants {
+            let class = format!("{}{}", e.name, v.dart_suffix);
+            lines.push(format!("        '{}' => const {class}(),", v.json_name));
+        }
+        lines.push(format!(
+            "        _ => throw ArgumentError('Unknown {} variant: $json'),",
+            e.name
+        ));
+        lines.push("      };".into());
+        lines.push("    }".into());
+    }
+
+    if !complex_variants.is_empty() {
+        lines.push("    if (json is Map<String, dynamic>) {".into());
+        for v in &complex_variants {
+            let class = format!("{}{}", e.name, v.dart_suffix);
+            match &v.kind {
+                VariantKind::Newtype { dart_type } => {
+                    let dart_ty = restore_dart_type(dart_type);
+                    let decoded = dart_ty.decode(&format!("json['{}']", v.json_name));
+                    lines.push(format!("      if (json.containsKey('{}')) {{", v.json_name));
+                    lines.push(format!("        return {class}({decoded});"));
+                    lines.push("      }".into());
+                }
+                VariantKind::Struct { .. } => {
+                    lines.push(format!("      if (json.containsKey('{}')) {{", v.json_name));
+                    lines.push(format!(
+                        "        return {class}.fromJson(json['{}'] as Map<String, dynamic>);",
+                        v.json_name
+                    ));
+                    lines.push("      }".into());
+                }
+                VariantKind::Unit => unreachable!(),
+            }
+        }
+        lines.push("    }".into());
+    }
+
+    lines.push(format!(
+        "    throw ArgumentError('Unknown {}: $json');",
+        e.name
+    ));
+    lines.push("  }".into());
+    lines.push(String::new());
+    lines.push("  dynamic toJson();".into());
+    lines.push("}".into());
+
+    // Concrete variant classes.
+    for v in &e.variants {
+        let class = format!("{}{}", e.name, v.dart_suffix);
+        lines.push(String::new());
+        match &v.kind {
+            VariantKind::Unit => {
+                lines.push(format!("final class {class} extends {} {{", e.name));
+                lines.push(format!("  const {class}();"));
+                lines.push(format!("  @override dynamic toJson() => '{}';", v.json_name));
+                lines.push("}".into());
+            }
+            VariantKind::Newtype { dart_type } => {
+                let dart_ty = restore_dart_type(dart_type);
+                let encoded = dart_ty.encode("value");
+                lines.push(format!("final class {class} extends {} {{", e.name));
+                lines.push(format!("  final {dart_type} value;"));
+                lines.push(format!("  const {class}(this.value);"));
+                lines.push(format!(
+                    "  @override dynamic toJson() => {{'{}': {encoded}}};",
+                    v.json_name
+                ));
+                lines.push("}".into());
+            }
+            VariantKind::Struct { fields } => {
+                let active: Vec<&FieldInfo> = fields.iter().filter(|f| !f.skip).collect();
+                lines.push(format!("final class {class} extends {} {{", e.name));
+                for f in &active {
+                    lines.push(format!("  final {} {};", f.dart_type, f.dart_name));
+                }
+                if active.is_empty() {
+                    lines.push(format!("  const {class}();"));
+                } else {
+                    lines.push(format!("  const {class}({{"));
+                    for f in &active {
+                        if f.is_optional {
+                            lines.push(format!("    this.{},", f.dart_name));
+                        } else {
+                            lines.push(format!("    required this.{},", f.dart_name));
+                        }
+                    }
+                    lines.push("  });".into());
+                }
+                // fromJson for struct variant.
+                lines.push(format!("  factory {class}.fromJson(Map<String, dynamic> map) {{"));
+                lines.push(format!("    return {class}("));
+                for f in &active {
+                    let dart_ty = restore_dart_type(&f.dart_type);
+                    let raw = format!("map['{}']", f.json_name);
+                    let decoded = dart_ty.decode(&raw);
+                    lines.push(format!("      {}: {decoded},", f.dart_name));
+                }
+                lines.push("    );".into());
+                lines.push("  }".into());
+                // toJson.
+                lines.push(format!("  @override dynamic toJson() => {{'{}': {{", v.json_name));
+                for f in &active {
+                    let dart_ty = restore_dart_type(&f.dart_type);
+                    let encoded = dart_ty.encode(&f.dart_name);
+                    lines.push(format!("    '{}': {encoded},", f.json_name));
+                }
+                lines.push("  }};".into());
+                lines.push("}".into());
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_enum_internal(e: &EnumInfo, tag: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("sealed class {} {{", e.name));
+    lines.push(format!("  const {}();", e.name));
+    lines.push(String::new());
+    lines.push(format!("  factory {}.fromJson(dynamic json) {{", e.name));
+    lines.push("    final map = json as Map<String, dynamic>;".into());
+    lines.push(format!("    return switch (map['{tag}'] as String) {{"));
+    for v in &e.variants {
+        let class = format!("{}{}", e.name, v.dart_suffix);
+        lines.push(format!("      '{}' => {class}.fromJson(map),", v.json_name));
+    }
+    lines.push(format!(
+        "      _ => throw ArgumentError('Unknown {}: ${{map[\'{tag}\']}}'),",
+        e.name
+    ));
+    lines.push("    };".into());
+    lines.push("  }".into());
+    lines.push(String::new());
+    lines.push("  Map<String, dynamic> toJson();".into());
+    lines.push("}".into());
+
+    for v in &e.variants {
+        let class = format!("{}{}", e.name, v.dart_suffix);
+        lines.push(String::new());
+        match &v.kind {
+            VariantKind::Unit => {
+                lines.push(format!("final class {class} extends {} {{", e.name));
+                lines.push(format!("  const {class}();"));
+                lines.push(format!("  factory {class}.fromJson(Map<String, dynamic> _) => const {class}();"));
+                lines.push(format!(
+                    "  @override Map<String, dynamic> toJson() => {{'{tag}': '{}'}};",
+                    v.json_name
+                ));
+                lines.push("}".into());
+            }
+            VariantKind::Struct { .. } | VariantKind::Newtype { .. } => {
+                let active: Vec<&FieldInfo> = match &v.kind {
+                    VariantKind::Struct { fields } => {
+                        fields.iter().filter(|f| !f.skip).collect()
+                    }
+                    _ => vec![],
+                };
+                lines.push(format!("final class {class} extends {} {{", e.name));
+                for f in &active {
+                    lines.push(format!("  final {} {};", f.dart_type, f.dart_name));
+                }
+                if active.is_empty() {
+                    lines.push(format!("  const {class}();"));
+                } else {
+                    lines.push(format!("  const {class}({{"));
+                    for f in &active {
+                        if f.is_optional {
+                            lines.push(format!("    this.{},", f.dart_name));
+                        } else {
+                            lines.push(format!("    required this.{},", f.dart_name));
+                        }
+                    }
+                    lines.push("  });".into());
+                }
+                lines.push(format!(
+                    "  factory {class}.fromJson(Map<String, dynamic> map) => {class}("
+                ));
+                for f in &active {
+                    let dart_ty = restore_dart_type(&f.dart_type);
+                    let raw = format!("map['{}']", f.json_name);
+                    let decoded = dart_ty.decode(&raw);
+                    lines.push(format!("    {}: {decoded},", f.dart_name));
+                }
+                lines.push("  );".into());
+                let mut json_entries: Vec<String> = vec![
+                    format!("'{tag}': '{}'", v.json_name)
+                ];
+                for f in &active {
+                    let dart_ty = restore_dart_type(&f.dart_type);
+                    let encoded = dart_ty.encode(&f.dart_name);
+                    json_entries.push(format!("'{}': {encoded}", f.json_name));
+                }
+                let body = json_entries.join(", ");
+                lines.push(format!(
+                    "  @override Map<String, dynamic> toJson() => {{{body}}};"
+                ));
+                lines.push("}".into());
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_enum_untagged(e: &EnumInfo) -> String {
+    // Untagged enums try each variant in order at runtime.
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("sealed class {} {{", e.name));
+    lines.push(format!("  const {}();", e.name));
+    lines.push(String::new());
+    lines.push(format!("  factory {}.fromJson(dynamic json) {{", e.name));
+    for v in &e.variants {
+        let class = format!("{}{}", e.name, v.dart_suffix);
+        match &v.kind {
+            VariantKind::Unit => {
+                lines.push(format!(
+                    "    if (json == null) return const {class}();"
+                ));
+            }
+            VariantKind::Newtype { dart_type } => {
+                let dart_ty = restore_dart_type(dart_type);
+                let decoded = dart_ty.decode("json");
+                lines.push(format!("    try {{ return {class}({decoded}); }} catch (_) {{}}"));
+            }
+            VariantKind::Struct { .. } => {
+                lines.push(format!(
+                    "    try {{ return {class}.fromJson(json as Map<String, dynamic>); }} catch (_) {{}}"
+                ));
+            }
+        }
+    }
+    lines.push(format!(
+        "    throw ArgumentError('No {} variant matched: $json');",
+        e.name
+    ));
+    lines.push("  }".into());
+    lines.push(String::new());
+    lines.push("  dynamic toJson();".into());
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+// ===========================================================================
+// Type mapping: Rust syn::Type → DartType
+// ===========================================================================
+
+fn rust_type_to_dart(ty: &Type) -> DartType {
+    match ty {
+        Type::Path(tp) => {
+            let seg = match tp.path.segments.last() {
+                Some(s) => s,
+                None => return DartType::Unknown("?".into()),
+            };
+            let ident = seg.ident.to_string();
+            match ident.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "i128"
+                | "u8" | "u16" | "u32" | "u64" | "u128"
+                | "usize" | "isize" => DartType::Int,
+                "f32" | "f64" => DartType::Double,
+                "bool" => DartType::Bool,
+                "String" | "str" => DartType::DartString,
+                "Option" => {
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                            return DartType::Nullable(Box::new(rust_type_to_dart(inner)));
+                        }
+                    }
+                    DartType::Nullable(Box::new(DartType::Unknown("?".into())))
+                }
+                "Vec" => {
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(GenericArgument::Type(elem)) = args.args.first() {
+                            return DartType::List(Box::new(rust_type_to_dart(elem)));
+                        }
+                    }
+                    DartType::List(Box::new(DartType::Unknown("?".into())))
+                }
+                "HashMap" | "BTreeMap" | "IndexMap" => {
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        let tys: Vec<_> = args.args.iter()
+                            .filter_map(|a| match a {
+                                GenericArgument::Type(t) => Some(rust_type_to_dart(t)),
+                                _ => None,
+                            })
+                            .collect();
+                        if tys.len() >= 2 {
+                            return DartType::Map(
+                                Box::new(tys[0].clone()),
+                                Box::new(tys[1].clone()),
+                            );
+                        }
+                    }
+                    DartType::Map(
+                        Box::new(DartType::DartString),
+                        Box::new(DartType::Unknown("?".into())),
+                    )
+                }
+                _ => DartType::Custom(ident),
+            }
+        }
+        Type::Reference(r) => rust_type_to_dart(&r.elem),
+        _ => DartType::Unknown(format!("{:?}", std::mem::discriminant(ty))),
+    }
+}
+
+/// Reconstruct a `DartType` from its `type_str()` representation for use in
+/// encode/decode expression generation.  We only need to handle what our own
+/// `type_str()` emits, so the format is tightly controlled.
+fn restore_dart_type(s: &str) -> DartType {
+    let s = s.trim();
+    if s.ends_with('?') {
+        let inner = restore_dart_type(&s[..s.len() - 1]);
+        return DartType::Nullable(Box::new(inner));
+    }
+    if s.starts_with("List<") && s.ends_with('>') {
+        let inner = restore_dart_type(&s[5..s.len() - 1]);
+        return DartType::List(Box::new(inner));
+    }
+    if s.starts_with("Map<") && s.ends_with('>') {
+        // Split on the first top-level ', '
+        let inner = &s[4..s.len() - 1];
+        if let Some(idx) = find_top_level_comma(inner) {
+            let k = restore_dart_type(&inner[..idx]);
+            let v = restore_dart_type(&inner[idx + 1..]);
+            return DartType::Map(Box::new(k), Box::new(v));
+        }
+    }
+    match s {
+        "int" => DartType::Int,
+        "double" => DartType::Double,
+        "bool" => DartType::Bool,
+        "String" => DartType::DartString,
+        "dynamic" => DartType::Unknown("dynamic".into()),
+        name if !name.starts_with("dynamic") => DartType::Custom(name.to_string()),
+        _ => DartType::Unknown(s.to_string()),
+    }
+}
+
+/// Find the index of the top-level comma in a type argument list like
+/// `"String, List<Foo>"`.  Skips commas nested inside `<>`.
+fn find_top_level_comma(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+// ===========================================================================
+// Name conversion utilities
+// ===========================================================================
+
+/// Converts a Rust PascalCase trait name to the allex wire snake_case module
+/// name — the same algorithm the `rpc_macro` proc macro uses.
+fn module_name_from_trait(ident_str: &str) -> String {
+    let mut output = String::new();
+    let chars: Vec<char> = ident_str.chars().collect();
+    for (index, &ch) in chars.iter().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                let prev = chars[index - 1];
+                if prev.is_ascii_lowercase()
+                    || prev.is_ascii_digit()
+                    || (prev.is_ascii_uppercase()
+                        && chars
+                            .get(index + 1)
+                            .is_some_and(|&next| next.is_ascii_lowercase()))
+                {
+                    output.push('_');
+                }
+            }
+            output.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_digit() {
+            if index > 0 && chars[index - 1].is_ascii_alphabetic() {
+                output.push('_');
+            }
+            output.push(ch);
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn snake_to_camel(s: &str) -> String {
+    let mut result = String::new();
+    let mut cap_next = false;
+    for ch in s.chars() {
+        if ch == '_' {
+            cap_next = true;
+        } else if cap_next {
+            result.push(ch.to_ascii_uppercase());
+            cap_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Apply a serde `rename_all` rule to a Rust identifier.
+/// Rust identifiers are always `snake_case`, so we only need to handle
+/// conversions away from snake_case.
+fn apply_rename_all(name: &str, rule: Option<&str>) -> String {
+    match rule {
+        None | Some("none") => name.to_string(),
+        Some("camelCase") => snake_to_camel(name),
+        Some("PascalCase") => {
+            let camel = snake_to_camel(name);
+            let mut c = camel.chars();
+            c.next().map(|ch| ch.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        }
+        Some("SCREAMING_SNAKE_CASE") => name.to_ascii_uppercase(),
+        Some("kebab-case") => name.replace('_', "-"),
+        Some("SCREAMING-KEBAB-CASE") => name.to_ascii_uppercase().replace('_', "-"),
+        // "snake_case", "lowercase", and anything unrecognised: keep as-is.
+        _ => name.to_string(),
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------------
+
+    const ARITHMETIC_TRAIT: &str = r#"
+        use rpc_macro::rpc_module;
+        use progressable_future::ProgressableFuture;
+
+        #[rpc_module]
+        pub trait ArithmeticV1 {
+            #[public]
+            fn add(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+
+            #[allowed_roles("admin")]
+            fn count(&self, req: CountRequest)
+                -> ProgressableFuture<CountStep, StepsMade, ArithmeticError>;
+        }
+    "#;
+
+    const ARITHMETIC_DTOS: &str = r#"
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct AddRequest { pub a: i32, pub b: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct AddResult { pub r: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct CountRequest { pub from: i32, pub to: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct CountStep { pub currently_at: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct StepsMade { pub total: i32 }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub enum ArithmeticError {
+            Overflow,
+            Interrupted,
+            Transport(String),
+        }
+    "#;
+
+    const OPTION_STRUCT: &str = r#"
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub struct GetRequest { pub known_version: Option<u64> }
+    "#;
+
+    // -----------------------------------------------------------------------
+    // RPC module tests (unchanged)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finds_rpc_module_trait() {
+        let modules = find_rpc_modules(ARITHMETIC_TRAIT);
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].trait_name, "ArithmeticV1");
+        assert_eq!(modules[0].module_name, "arithmetic_v_1");
+        assert_eq!(modules[0].methods.len(), 2);
+    }
+
+    #[test]
+    fn referenced_types_collected() {
+        let modules = find_rpc_modules(ARITHMETIC_TRAIT);
+        let refs = referenced_type_names(&modules[0]);
+        assert!(refs.contains(&"AddRequest".to_string()));
+        assert!(refs.contains(&"AddResult".to_string()));
+        assert!(refs.contains(&"ArithmeticError".to_string()));
+        assert!(refs.contains(&"CountRequest".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // DTO extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finds_dto_structs() {
+        let dtos = find_dto_types(ARITHMETIC_DTOS);
+        let names: Vec<&str> = dtos.iter().map(|d| d.name()).collect();
+        assert!(names.contains(&"AddRequest"));
+        assert!(names.contains(&"ArithmeticError"));
+    }
+
+    #[test]
+    fn struct_fields_extracted() {
+        let dtos = find_dto_types(ARITHMETIC_DTOS);
+        let add = dtos.iter().find(|d| d.name() == "AddRequest").unwrap();
+        if let DtoInfo::Struct(s) = add {
+            assert_eq!(s.fields.len(), 2);
+            let a = s.fields.iter().find(|f| f.dart_name == "a").unwrap();
+            assert_eq!(a.dart_type, "int");
+            assert_eq!(a.json_name, "a");
+        } else {
+            panic!("Expected struct");
+        }
+    }
+
+    #[test]
+    fn option_field_is_nullable() {
+        let dtos = find_dto_types(OPTION_STRUCT);
+        if let DtoInfo::Struct(s) = &dtos[0] {
+            let f = s.fields.iter().find(|f| f.dart_name == "knownVersion").unwrap();
+            assert_eq!(f.dart_type, "int?");
+            assert!(f.is_optional);
+            assert_eq!(f.json_name, "known_version");
+        } else {
+            panic!("Expected struct");
+        }
+    }
+
+    #[test]
+    fn enum_variants_extracted() {
+        let dtos = find_dto_types(ARITHMETIC_DTOS);
+        let err = dtos.iter().find(|d| d.name() == "ArithmeticError").unwrap();
+        if let DtoInfo::Enum(e) = err {
+            assert!(matches!(e.repr, EnumRepr::External));
+            assert_eq!(e.variants.len(), 3);
+            let overflow = e.variants.iter().find(|v| v.json_name == "Overflow").unwrap();
+            assert!(matches!(overflow.kind, VariantKind::Unit));
+            let transport = e.variants.iter().find(|v| v.json_name == "Transport").unwrap();
+            assert!(matches!(&transport.kind, VariantKind::Newtype { dart_type } if dart_type == "String"));
+        } else {
+            panic!("Expected enum");
+        }
+    }
+
+    #[test]
+    fn reachable_dtos_transitive() {
+        // A struct that references another struct.
+        let src = r#"
+            use serde::{Serialize, Deserialize};
+            #[derive(Serialize, Deserialize)]
+            pub struct Outer { pub inner: Inner }
+            #[derive(Serialize, Deserialize)]
+            pub struct Inner { pub x: i32 }
+            #[derive(Serialize, Deserialize)]
+            pub struct Unrelated { pub y: i32 }
+        "#;
+        let reachable = find_reachable_dtos(src, &["Outer"]);
+        let names: Vec<&str> = reachable.iter().map(|d| d.name()).collect();
+        assert!(names.contains(&"Outer"));
+        assert!(names.contains(&"Inner"));
+        assert!(!names.contains(&"Unrelated"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn renders_struct_dart() {
+        let dtos = find_dto_types(ARITHMETIC_DTOS);
+        let dtos_dart = render_dart_dtos("arithmetic_v_1", &dtos, &[]);
+        assert!(dtos_dart.contains("class AddRequest {"));
+        assert!(dtos_dart.contains("final int a;"));
+        assert!(dtos_dart.contains("required this.a,"));
+        assert!(dtos_dart.contains("factory AddRequest.fromJson(dynamic json)"));
+        assert!(dtos_dart.contains("Map<String, dynamic> toJson()"));
+        assert!(dtos_dart.contains("'a': a,"));
+    }
+
+    #[test]
+    fn renders_option_field() {
+        let dtos = find_dto_types(OPTION_STRUCT);
+        let dart = render_dart_dtos("x", &dtos, &[]);
+        assert!(dart.contains("final int? knownVersion;"));
+        assert!(dart.contains("this.knownVersion,"));  // not required
+        assert!(dart.contains("knownVersion: (map['known_version'] as num?)?.toInt()"));
+        assert!(dart.contains("'known_version': knownVersion,"));
+    }
+
+    #[test]
+    fn renders_enum_external() {
+        let dtos = find_dto_types(ARITHMETIC_DTOS);
+        let dart = render_dart_dtos("arithmetic_v_1", &dtos, &[]);
+        assert!(dart.contains("sealed class ArithmeticError {"));
+        assert!(dart.contains("final class ArithmeticErrorOverflow extends ArithmeticError {"));
+        assert!(dart.contains("final class ArithmeticErrorTransport extends ArithmeticError {"));
+        assert!(dart.contains("@override dynamic toJson() => 'Overflow'"));
+        assert!(dart.contains("@override dynamic toJson() => {'Transport': value}"));
+        assert!(dart.contains("'Overflow' => const ArithmeticErrorOverflow(),"));
+    }
+
+    #[test]
+    fn renders_dart_client_imports_dtos() {
+        let modules = find_rpc_modules(ARITHMETIC_TRAIT);
+        let dart = render_dart_client(&modules[0]);
+        assert!(dart.contains("import 'arithmetic_v_1_dtos.dart';"));
+        assert!(!dart.contains("extra_imports"));
+    }
+
+    #[test]
+    fn module_name_conversion() {
+        assert_eq!(module_name_from_trait("ArithmeticV1"), "arithmetic_v_1");
+        assert_eq!(module_name_from_trait("ActiveSchedulesV1"), "active_schedules_v_1");
+    }
+
+    #[test]
+    fn apply_rename_all_cases() {
+        assert_eq!(apply_rename_all("hello_world", Some("camelCase")), "helloWorld");
+        assert_eq!(apply_rename_all("hello_world", Some("PascalCase")), "HelloWorld");
+        assert_eq!(apply_rename_all("hello_world", Some("SCREAMING_SNAKE_CASE")), "HELLO_WORLD");
+        assert_eq!(apply_rename_all("hello_world", None), "hello_world");
+    }
+}

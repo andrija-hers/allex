@@ -1,0 +1,14 @@
+name: allex
+description: >
+  Dart runtime library for the allex RPC transport.
+  Provides AllexTransport, AllexResult, and AllexStep.
+  Used by generated client classes — do not depend on this package directly
+  from application code; depend on the generated client instead.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  http: ^1.2.0
