@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::HashSet,
     future::Future,
     sync::{Arc, Mutex},
@@ -33,17 +33,26 @@ struct Claims {
 pub struct PostgresIdentityStore {
     db: Db,
     secret: String,
+    token_ttl_secs: u64,
     /// In-memory blacklist of revoked tokens. Cleared on restart (acceptable since
-    /// all JWTs expire after 1 hour). Shared across clones via Arc.
+    /// all JWTs expire after 1 hour by default). Shared across clones via Arc.
     revoked_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 impl PostgresIdentityStore {
     /// Creates a new store backed by `db`, signing JWTs with `secret`.
+    /// Creates a new store; tokens expire after 1 hour (3600 s).
     pub fn new(db: Db, secret: impl Into<String>) -> Self {
+        Self::new_with_ttl(db, secret, 3600)
+    }
+
+    /// Like [`new`](Self::new) but with a configurable TTL in seconds.
+    /// Intended for testing (e.g. `JWT_TTL_SECS=30`).
+    pub fn new_with_ttl(db: Db, secret: impl Into<String>, token_ttl_secs: u64) -> Self {
         Self {
             db,
             secret: secret.into(),
+            token_ttl_secs,
             revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -83,12 +92,8 @@ impl PostgresIdentityStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as usize
-            + 3600;
-        let claims = Claims {
-            sub: sub.to_string(),
-            role: role.to_string(),
-            exp,
-        };
+            + self.token_ttl_secs as usize;
+        let claims = Claims { sub: sub.to_string(), role: role.to_string(), exp };
         encode(
             &Header::default(),
             &claims,
@@ -140,6 +145,7 @@ impl IdentityV1 for PostgresIdentityStore {
             let store = PostgresIdentityStore {
                 db,
                 secret,
+                token_ttl_secs: 3600,
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&handle, &role)?;
@@ -186,6 +192,7 @@ impl IdentityV1 for PostgresIdentityStore {
             let store = PostgresIdentityStore {
                 db,
                 secret,
+                token_ttl_secs: 3600,
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&req.handle, &role)?;
