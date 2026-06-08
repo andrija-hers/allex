@@ -14,7 +14,9 @@ transport = { path = "../transport", package = "allex-transport" }
 bcrypt = "0.15"
 jsonwebtoken = "9"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

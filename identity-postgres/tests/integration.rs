@@ -9,7 +9,10 @@
 
 use allex_identity_postgres::PostgresIdentityStore;
 use allex_postgres::Db;
-use identity::{IdentityError, IdentityV1, LoginRequest, RegisterRequest, ValidateRequest};
+use identity::{
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest,
+    ValidateRequest,
+};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use transport::BearerTokenValidator;
@@ -24,6 +27,15 @@ async fn start_store() -> (
     PostgresIdentityStore,
     testcontainers::ContainerAsync<Postgres>,
 ) {
+    let (store, _conn_str, container) = start_store_with_conn().await;
+    (store, container)
+}
+
+async fn start_store_with_conn() -> (
+    PostgresIdentityStore,
+    String,
+    testcontainers::ContainerAsync<Postgres>,
+) {
     let container = Postgres::default()
         .start()
         .await
@@ -31,10 +43,15 @@ async fn start_store() -> (
     let host = container.get_host().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let conn_str = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    let db = Db::connect(&conn_str).expect("valid connection string");
+    let store = reconnect_store(&conn_str).await;
+    (store, conn_str, container)
+}
+
+async fn reconnect_store(conn_str: &str) -> PostgresIdentityStore {
+    let db = Db::connect(conn_str).expect("valid connection string");
     let store = PostgresIdentityStore::new(db, SECRET);
     store.setup().await.expect("schema setup must succeed");
-    (store, container)
+    store
 }
 
 fn reg(handle: &str, password: &str) -> RegisterRequest {
@@ -75,6 +92,7 @@ async fn register_creates_user_and_returns_valid_jwt() {
     let (store, _c) = start_store().await;
     let resp = store.register(reg("alice", "s3cr3t")).await.unwrap();
     assert!(!resp.token.is_empty());
+    assert!(!resp.refresh_token.is_empty());
 
     // The returned token must be immediately usable for validate.
     let role_resp = store
@@ -106,6 +124,7 @@ async fn login_valid_credentials_returns_jwt() {
 
     let resp = store.login(login("carol", "my-password")).await.unwrap();
     assert!(!resp.token.is_empty());
+    assert!(!resp.refresh_token.is_empty());
 
     let role_resp = store
         .validate(ValidateRequest { token: resp.token })
@@ -195,6 +214,100 @@ async fn validate_bearer_invalid_token_returns_none() {
     let (store, _c) = start_store().await;
     let role = store.validate_bearer("garbage.token.data");
     assert_eq!(role, None);
+}
+
+#[tokio::test]
+async fn refresh_returns_rotated_tokens() {
+    let (store, _c) = start_store().await;
+    let resp = store.register(reg("heidi", "password")).await.unwrap();
+
+    let refreshed = store
+        .refresh(RefreshRequest {
+            refresh_token: resp.refresh_token.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_ne!(refreshed.token, resp.token);
+    assert_ne!(refreshed.refresh_token, resp.refresh_token);
+    assert_eq!(store.validate_bearer(&refreshed.token), Some("user".to_string()));
+
+    let err = store
+        .refresh(RefreshRequest {
+            refresh_token: resp.refresh_token,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, IdentityError::InvalidRefreshToken));
+}
+
+#[tokio::test]
+async fn refresh_rotation_survives_store_recreation() {
+    let (store, conn_str, _c) = start_store_with_conn().await;
+    let resp = store.register(reg("karen", "password")).await.unwrap();
+    let refreshed = store
+        .refresh(RefreshRequest {
+            refresh_token: resp.refresh_token.clone(),
+        })
+        .await
+        .unwrap();
+
+    let restarted = reconnect_store(&conn_str).await;
+
+    let err = restarted
+        .refresh(RefreshRequest {
+            refresh_token: resp.refresh_token,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, IdentityError::InvalidRefreshToken));
+
+    let rotated_again = restarted
+        .refresh(RefreshRequest {
+            refresh_token: refreshed.refresh_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restarted.validate_bearer(&rotated_again.token), Some("user".to_string()));
+}
+
+#[tokio::test]
+async fn validate_rejects_refresh_tokens() {
+    let (store, _c) = start_store().await;
+    let resp = store.register(reg("ivan", "password")).await.unwrap();
+
+    let err = store
+        .validate(ValidateRequest {
+            token: resp.refresh_token,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, IdentityError::InvalidToken));
+}
+
+#[tokio::test]
+async fn logout_revokes_refresh_tokens_durably() {
+    let (store, conn_str, _c) = start_store_with_conn().await;
+    let resp = store.register(reg("judy", "password")).await.unwrap();
+
+    store
+        .logout(LogoutRequest {
+            token: Some(resp.token.clone()),
+            refresh_token: Some(resp.refresh_token.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.validate_bearer(&resp.token), None);
+
+    let restarted = reconnect_store(&conn_str).await;
+    let err = restarted
+        .refresh(RefreshRequest {
+            refresh_token: resp.refresh_token,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, IdentityError::InvalidRefreshToken));
 }
 
 // ---------------------------------------------------------------------------
