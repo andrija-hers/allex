@@ -5,23 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RegisterRequest,
-    RoleResponse, TokenResponse, ValidateRequest,
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
+    RegisterRequest, RoleResponse, TokenResponse, ValidateRequest, issue_token_response,
+    validate_access_token, validate_refresh_token,
 };
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use transport::BearerTokenValidator;
 
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
-
-#[derive(Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    role: String,
-    exp: usize,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredUser {
@@ -48,7 +41,8 @@ pub enum RedbIdentityStoreError {
 pub struct RedbIdentityStore {
     database: Arc<Database>,
     secret: String,
-    revoked_tokens: Arc<Mutex<HashSet<String>>>,
+    revoked_access_tokens: Arc<Mutex<HashSet<String>>>,
+    revoked_refresh_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RedbIdentityStore {
@@ -71,7 +65,8 @@ impl RedbIdentityStore {
         Ok(Self {
             database: Arc::new(database),
             secret: secret.into(),
-            revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+            revoked_access_tokens: Arc::new(Mutex::new(HashSet::new())),
+            revoked_refresh_tokens: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -89,35 +84,6 @@ impl RedbIdentityStore {
         .await
         .map_err(join_err)?
     }
-
-    fn decode_jwt(&self, token: &str) -> Option<Claims> {
-        decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(self.secret.as_bytes()),
-            &Validation::default(),
-        )
-        .ok()
-        .map(|decoded| decoded.claims)
-    }
-
-    fn issue_jwt(&self, sub: &str, role: &str) -> Result<String, IdentityError> {
-        let exp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as usize
-            + 3600;
-        let claims = Claims {
-            sub: sub.to_string(),
-            role: role.to_string(),
-            exp,
-        };
-        encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(self.secret.as_bytes()),
-        )
-        .map_err(|e| IdentityError::Internal(e.to_string()))
-    }
 }
 
 impl IdentityV1 for RedbIdentityStore {
@@ -127,7 +93,6 @@ impl IdentityV1 for RedbIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let database = self.database.clone();
         let secret = self.secret.clone();
-        let revoked_tokens = self.revoked_tokens.clone();
         async move {
             let password = req.password.clone();
             let password_hash = tokio::task::spawn_blocking(move || {
@@ -173,17 +138,8 @@ impl IdentityV1 for RedbIdentityStore {
             .await
             .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
-            let store = RedbIdentityStore {
-                database,
-                secret,
-                revoked_tokens,
-            };
-            let token = store.issue_jwt(&req.handle, &req.role)?;
-            Ok(TokenResponse {
-                token,
-                handle: req.handle,
-                role: req.role,
-            })
+            drop(database);
+            issue_token_response(&secret, &req.handle, &req.role)
         }
     }
 
@@ -193,7 +149,6 @@ impl IdentityV1 for RedbIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let database = self.database.clone();
         let secret = self.secret.clone();
-        let revoked_tokens = self.revoked_tokens.clone();
         async move {
             let handle = req.handle.clone();
             let database_for_read = database.clone();
@@ -230,17 +185,29 @@ impl IdentityV1 for RedbIdentityStore {
             }
 
             let role = stored.role;
-            let store = RedbIdentityStore {
-                database,
-                secret,
-                revoked_tokens,
-            };
-            let token = store.issue_jwt(&req.handle, &role)?;
-            Ok(TokenResponse {
-                token,
-                handle: req.handle,
-                role,
-            })
+            drop(database);
+            issue_token_response(&secret, &req.handle, &role)
+        }
+    }
+
+    fn refresh(
+        &self,
+        req: RefreshRequest,
+    ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
+        let secret = self.secret.clone();
+        let revoked_refresh_tokens = self.revoked_refresh_tokens.clone();
+        async move {
+            let claims = validate_refresh_token(&secret, &req.refresh_token)?;
+            let mut revoked = revoked_refresh_tokens
+                .lock()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            if revoked.contains(&req.refresh_token) {
+                return Err(IdentityError::InvalidRefreshToken);
+            }
+            revoked.insert(req.refresh_token);
+            drop(revoked);
+
+            issue_token_response(&secret, &claims.handle, &claims.role)
         }
     }
 
@@ -249,14 +216,17 @@ impl IdentityV1 for RedbIdentityStore {
         req: ValidateRequest,
     ) -> impl Future<Output = Result<RoleResponse, IdentityError>> + Send {
         let secret = self.secret.clone();
+        let revoked_access_tokens = self.revoked_access_tokens.clone();
         async move {
-            let claims = decode::<Claims>(
-                &req.token,
-                &DecodingKey::from_secret(secret.as_bytes()),
-                &Validation::default(),
-            )
-            .map_err(|_| IdentityError::InvalidToken)?
-            .claims;
+            let is_revoked = revoked_access_tokens
+                .lock()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?
+                .contains(&req.token);
+            if is_revoked {
+                return Err(IdentityError::InvalidToken);
+            }
+
+            let claims = validate_access_token(&secret, &req.token)?;
             Ok(RoleResponse { role: claims.role })
         }
     }
@@ -265,12 +235,31 @@ impl IdentityV1 for RedbIdentityStore {
         &self,
         req: LogoutRequest,
     ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
-        let revoked = self.revoked_tokens.clone();
+        let revoked_access_tokens = self.revoked_access_tokens.clone();
+        let revoked_refresh_tokens = self.revoked_refresh_tokens.clone();
         async move {
-            revoked
-                .lock()
-                .map_err(|e| IdentityError::Internal(e.to_string()))?
-                .insert(req.token);
+            let mut saw_token = false;
+
+            if let Some(token) = req.token {
+                revoked_access_tokens
+                    .lock()
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?
+                    .insert(token);
+                saw_token = true;
+            }
+
+            if let Some(refresh_token) = req.refresh_token {
+                revoked_refresh_tokens
+                    .lock()
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?
+                    .insert(refresh_token);
+                saw_token = true;
+            }
+
+            if !saw_token {
+                return Err(IdentityError::InvalidToken);
+            }
+
             Ok(LogoutResponse {})
         }
     }
@@ -279,14 +268,16 @@ impl IdentityV1 for RedbIdentityStore {
 impl BearerTokenValidator for RedbIdentityStore {
     fn validate_bearer(&self, token: &str) -> Option<String> {
         let is_revoked = self
-            .revoked_tokens
+            .revoked_access_tokens
             .lock()
             .map(|set| set.contains(token))
             .unwrap_or(false);
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| c.role)
+        validate_access_token(&self.secret, token)
+            .ok()
+            .map(|claims| claims.role)
     }
 }
 

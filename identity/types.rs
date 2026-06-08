@@ -23,22 +23,35 @@ pub struct LoginRequest {
 /// Request payload for validating a previously issued JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidateRequest {
-    /// Bearer token to validate.
+    /// Access token to validate.
     pub token: String,
 }
 
-/// Request payload for invalidating a JWT (logout).
+/// Request payload for exchanging a refresh token for a fresh token pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    /// Refresh token to rotate.
+    pub refresh_token: String,
+}
+
+/// Request payload for invalidating one or more tokens (logout).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutRequest {
-    /// The bearer token to revoke.
-    pub token: String,
+    /// The current access token to revoke, if available.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// The refresh token to revoke, if available.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
-/// Response payload containing a newly issued JWT.
+/// Response payload containing a fresh access/refresh token pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
-    /// Encoded JWT.
+    /// Encoded access token.
     pub token: String,
+    /// Encoded refresh token.
+    pub refresh_token: String,
     /// Authenticated user handle.
     pub handle: String,
     /// Role assigned to the user.
@@ -63,8 +76,10 @@ pub enum IdentityError {
     HandleAlreadyTaken,
     /// The provided login credentials did not match a stored user.
     InvalidCredentials,
-    /// The provided token could not be validated.
+    /// The provided access token could not be validated.
     InvalidToken,
+    /// The provided refresh token could not be validated.
+    InvalidRefreshToken,
     /// An internal dependency failed and produced a message.
     Internal(String),
 }

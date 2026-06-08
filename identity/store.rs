@@ -5,22 +5,14 @@ use std::{
 };
 
 use bcrypt::{DEFAULT_COST, hash, verify};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use transport::BearerTokenValidator;
 
 use crate::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RegisterRequest,
-    RoleResponse, TokenResponse, ValidateRequest,
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
+    RegisterRequest, RoleResponse, TokenResponse, ValidateRequest, issue_token_response,
+    validate_access_token, validate_refresh_token,
 };
-
-#[derive(Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    role: String,
-    exp: usize,
-}
 
 struct StoredUser {
     password_hash: String,
@@ -30,7 +22,8 @@ struct StoredUser {
 struct IdentityStoreInner {
     secret: String,
     users: Arc<Mutex<HashMap<String, StoredUser>>>,
-    revoked_tokens: Arc<Mutex<HashSet<String>>>,
+    revoked_access_tokens: Arc<Mutex<HashSet<String>>>,
+    revoked_refresh_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 /// An in-memory identity store supporting register, login, JWT validation, and logout.
@@ -43,37 +36,9 @@ impl InMemoryIdentityStore {
         Self(Arc::new(IdentityStoreInner {
             secret: secret.into(),
             users: Arc::new(Mutex::new(HashMap::new())),
-            revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
+            revoked_access_tokens: Arc::new(Mutex::new(HashSet::new())),
+            revoked_refresh_tokens: Arc::new(Mutex::new(HashSet::new())),
         }))
-    }
-
-    fn decode_jwt(&self, token: &str) -> Option<Claims> {
-        decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(self.0.secret.as_bytes()),
-            &Validation::default(),
-        )
-        .ok()
-        .map(|d| d.claims)
-    }
-
-    fn issue_jwt(secret: &str, handle: &str, role: &str) -> Result<String, IdentityError> {
-        let exp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as usize
-            + 3600;
-        let claims = Claims {
-            sub: handle.to_owned(),
-            role: role.to_owned(),
-            exp,
-        };
-        encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .map_err(|e| IdentityError::Internal(e.to_string()))
     }
 }
 
@@ -105,12 +70,7 @@ impl IdentityV1 for InMemoryIdentityStore {
             );
             drop(users);
 
-            let token = Self::issue_jwt(&secret, &req.handle, &req.role)?;
-            Ok(TokenResponse {
-                token,
-                handle: req.handle,
-                role: req.role,
-            })
+            issue_token_response(&secret, &req.handle, &req.role)
         }
     }
 
@@ -140,12 +100,27 @@ impl IdentityV1 for InMemoryIdentityStore {
                 return Err(IdentityError::InvalidCredentials);
             }
 
-            let token = Self::issue_jwt(&secret, &req.handle, &role)?;
-            Ok(TokenResponse {
-                token,
-                handle: req.handle,
-                role,
-            })
+            issue_token_response(&secret, &req.handle, &role)
+        }
+    }
+
+    fn refresh(
+        &self,
+        req: RefreshRequest,
+    ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
+        let secret = self.0.secret.clone();
+        let revoked_refresh_tokens = self.0.revoked_refresh_tokens.clone();
+        async move {
+            let claims = validate_refresh_token(&secret, &req.refresh_token)?;
+
+            let mut revoked = revoked_refresh_tokens.lock().await;
+            if revoked.contains(&req.refresh_token) {
+                return Err(IdentityError::InvalidRefreshToken);
+            }
+            revoked.insert(req.refresh_token);
+            drop(revoked);
+
+            issue_token_response(&secret, &claims.handle, &claims.role)
         }
     }
 
@@ -154,14 +129,13 @@ impl IdentityV1 for InMemoryIdentityStore {
         req: ValidateRequest,
     ) -> impl Future<Output = Result<RoleResponse, IdentityError>> + Send {
         let secret = self.0.secret.clone();
+        let revoked_access_tokens = self.0.revoked_access_tokens.clone();
         async move {
-            let claims = decode::<Claims>(
-                &req.token,
-                &DecodingKey::from_secret(secret.as_bytes()),
-                &Validation::default(),
-            )
-            .map_err(|_| IdentityError::InvalidToken)?
-            .claims;
+            if revoked_access_tokens.lock().await.contains(&req.token) {
+                return Err(IdentityError::InvalidToken);
+            }
+
+            let claims = validate_access_token(&secret, &req.token)?;
             Ok(RoleResponse { role: claims.role })
         }
     }
@@ -170,9 +144,25 @@ impl IdentityV1 for InMemoryIdentityStore {
         &self,
         req: LogoutRequest,
     ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
-        let revoked = self.0.revoked_tokens.clone();
+        let revoked_access_tokens = self.0.revoked_access_tokens.clone();
+        let revoked_refresh_tokens = self.0.revoked_refresh_tokens.clone();
         async move {
-            revoked.lock().await.insert(req.token);
+            let mut saw_token = false;
+
+            if let Some(token) = req.token {
+                revoked_access_tokens.lock().await.insert(token);
+                saw_token = true;
+            }
+
+            if let Some(refresh_token) = req.refresh_token {
+                revoked_refresh_tokens.lock().await.insert(refresh_token);
+                saw_token = true;
+            }
+
+            if !saw_token {
+                return Err(IdentityError::InvalidToken);
+            }
+
             Ok(LogoutResponse {})
         }
     }
@@ -181,17 +171,114 @@ impl IdentityV1 for InMemoryIdentityStore {
 impl BearerTokenValidator for InMemoryIdentityStore {
     fn validate_bearer(&self, token: &str) -> Option<String> {
         // Check blacklist synchronously — we need a blocking check here.
-        // Since revoked_tokens uses tokio::Mutex, we use try_lock; if contended
+        // Since revoked_access_tokens uses tokio::Mutex, we use try_lock; if contended
         // we conservatively allow (extremely rare at logout timing).
         let is_revoked = self
             .0
-            .revoked_tokens
+            .revoked_access_tokens
             .try_lock()
             .map(|set| set.contains(token))
             .unwrap_or(false);
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| c.role)
+        validate_access_token(&self.0.secret, token)
+            .ok()
+            .map(|claims| claims.role)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RefreshRequest, ValidateRequest};
+
+    fn register_request(handle: &str, password: &str) -> RegisterRequest {
+        RegisterRequest {
+            handle: handle.into(),
+            password: password.into(),
+            role: "user".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_refresh_tokens() {
+        let store = InMemoryIdentityStore::new("secret");
+        let tokens = store
+            .register(register_request("alice", "password"))
+            .await
+            .unwrap();
+
+        let rotated = store
+            .refresh(RefreshRequest {
+                refresh_token: tokens.refresh_token.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(rotated.token, tokens.token);
+        assert_ne!(rotated.refresh_token, tokens.refresh_token);
+        assert_eq!(
+            store
+                .validate(ValidateRequest {
+                    token: rotated.token.clone(),
+                })
+                .await
+                .unwrap()
+                .role,
+            "user"
+        );
+
+        let err = store
+            .refresh(RefreshRequest {
+                refresh_token: tokens.refresh_token,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidRefreshToken));
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_refresh_tokens() {
+        let store = InMemoryIdentityStore::new("secret");
+        let tokens = store
+            .register(register_request("bob", "password"))
+            .await
+            .unwrap();
+
+        let err = store
+            .validate(ValidateRequest {
+                token: tokens.refresh_token,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidToken));
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_access_and_refresh_tokens() {
+        let store = InMemoryIdentityStore::new("secret");
+        let tokens = store
+            .register(register_request("carol", "password"))
+            .await
+            .unwrap();
+
+        store
+            .logout(LogoutRequest {
+                token: Some(tokens.token.clone()),
+                refresh_token: Some(tokens.refresh_token.clone()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(store.validate_bearer(&tokens.token), None);
+
+        let err = store
+            .refresh(RefreshRequest {
+                refresh_token: tokens.refresh_token,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidRefreshToken));
     }
 }
