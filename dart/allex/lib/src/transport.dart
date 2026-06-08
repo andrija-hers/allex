@@ -4,8 +4,8 @@ import 'package:http/http.dart' as http;
 import 'types.dart';
 
 typedef AllexBearerTokenProvider = FutureOr<String?> Function();
-typedef AllexBearerTokenRefresher =
-    FutureOr<bool> Function(AllexAuthFailure failure);
+typedef AllexBearerTokenRefresher = FutureOr<bool> Function(
+    AllexAuthFailure failure);
 
 class AllexAuthFailure {
   final Uri uri;
@@ -47,10 +47,6 @@ class AllexTransport {
 
   void dispose() => _client.close();
 
-  // -------------------------------------------------------------------------
-  // Unary call
-  // -------------------------------------------------------------------------
-
   Future<AllexResult<T, E>> callUnary<T, E>({
     required String module,
     required String method,
@@ -58,35 +54,25 @@ class AllexTransport {
     required T Function(dynamic json) decode,
     required E Function(dynamic json) decodeError,
   }) async {
-    final body = _encodeRpcCall(module, method, request);
     final response = await _postWithAuthRetry(
       module: module,
       method: method,
-      body: body,
+      body: _encodeRpcCall(module, method, request),
     );
 
-    if (response.statusCode != 200) {
-      throw AllexError(
-        'HTTP ${response.statusCode} for $module/$method',
-        httpStatus: response.statusCode,
-      );
+    if (response.statusCode == 200) {
+      return Ok(decode(_decodePayload(response.body)));
     }
 
-    final decoded = _decodePayload(response.body);
-    if (decoded is Map) {
-      if (decoded.containsKey('Ok')) {
-        return Ok(decode(decoded['Ok']));
-      }
-      if (decoded.containsKey('Err')) {
-        return Err(decodeError(decoded['Err']));
-      }
+    if (response.statusCode == 422) {
+      return Err(decodeError(_decodePayload(response.body)));
     }
-    throw AllexError('Unexpected response shape for $module/$method: $decoded');
+
+    throw AllexError(
+      _httpErrorMessage(response.statusCode, module, method, response.body),
+      httpStatus: response.statusCode,
+    );
   }
-
-  // -------------------------------------------------------------------------
-  // Streaming call
-  // -------------------------------------------------------------------------
 
   Stream<AllexStep<P, S, E>> callStreaming<P, S, E>({
     required String module,
@@ -112,7 +98,12 @@ class AllexTransport {
 
           if (streamed.statusCode != 200) {
             throw AllexError(
-              'HTTP ${streamed.statusCode} for $module/$method',
+              _httpErrorMessage(
+                streamed.statusCode,
+                module,
+                method,
+                await streamed.stream.bytesToString(),
+              ),
               httpStatus: streamed.statusCode,
             );
           }
@@ -122,7 +113,6 @@ class AllexTransport {
             buffer.write(chunk);
             final text = buffer.toString();
             final lines = text.split('\n');
-            // All complete lines except the last (which may be partial).
             for (final line in lines.sublist(0, lines.length - 1)) {
               final trimmed = line.trim();
               if (trimmed.isEmpty) continue;
@@ -133,61 +123,76 @@ class AllexTransport {
               } else if (frame.containsKey('Success')) {
                 final payload = _decodePayload(jsonEncode(frame['Success']));
                 controller.add(AllexSuccess(decodeSuccess(payload)));
-                return; // stream ended cleanly
+                await controller.close();
+                return;
               } else if (frame.containsKey('Error')) {
                 final payload = _decodePayload(jsonEncode(frame['Error']));
                 controller.add(AllexFailed(decodeError(payload)));
+                await controller.close();
                 return;
               }
             }
-            // Keep the incomplete last line in the buffer.
             buffer
               ..clear()
               ..write(lines.last);
           }
-          // Server closed the connection without a Success/Error frame.
-          // Fall through to reconnect.
         } on AllexError {
           rethrow;
-        } catch (e) {
+        } catch (_) {
           if (isCanceled) return;
-          // Brief pause before reconnect to avoid hammering a failing server.
           await Future<void>.delayed(const Duration(seconds: 2));
         }
-        if (isCanceled) return;
-        // Brief pause between reconnect attempts.
+        if (isCanceled) {
+          await controller.close();
+          return;
+        }
         await Future<void>.delayed(const Duration(seconds: 1));
       }
+
+      await controller.close();
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Wire encoding helpers
-  // -------------------------------------------------------------------------
-
-  /// Encodes an allex RPC call body.
-  ///
-  /// Wire format:
-  ///   outer = jsonEncode(bytes)
-  ///   where bytes = utf8.encode(inner)
-  ///   inner = jsonEncode([module, [method, argBytes]])
-  ///   argBytes = utf8.encode(jsonEncode(args))
   String _encodeRpcCall(String module, String method, dynamic args) {
     final argBytes = utf8.encode(jsonEncode(args));
-    final inner = jsonEncode([module, [method, argBytes]]);
+    final inner = jsonEncode([
+      module,
+      [method, argBytes]
+    ]);
     final outerBytes = utf8.encode(inner);
     return jsonEncode(outerBytes);
   }
 
-  /// Decodes a double-wrapped allex response payload.
   dynamic _decodePayload(String raw) {
     final outer = jsonDecode(raw);
     if (outer is List<dynamic>) {
       final bytes = List<int>.from(outer);
       return jsonDecode(utf8.decode(bytes));
     }
-    // Fallback: server returned plain JSON (should not happen in normal operation).
     return outer;
+  }
+
+  String _httpErrorMessage(
+    int statusCode,
+    String module,
+    String method,
+    String body,
+  ) {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) {
+      return 'HTTP $statusCode for $module/$method';
+    }
+
+    return 'HTTP $statusCode for $module/$method: ${_decodeHttpBody(trimmed)}';
+  }
+
+  String _decodeHttpBody(String body) {
+    try {
+      final decoded = _decodePayload(body);
+      return decoded is String ? decoded : jsonEncode(decoded);
+    } catch (_) {
+      return body;
+    }
   }
 
   Future<http.Response> _postWithAuthRetry({

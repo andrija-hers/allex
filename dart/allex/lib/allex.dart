@@ -13,4 +13,13 @@ export 'src/transport.dart'
         AllexBearerTokenProvider,
         AllexBearerTokenRefresher,
         AllexTransport;
-export 'src/types.dart' show AllexResult, AllexStep, AllexError;
+export 'src/types.dart'
+    show
+        AllexError,
+        AllexFailed,
+        AllexProgress,
+        AllexResult,
+        AllexStep,
+        AllexSuccess,
+        Err,
+        Ok;

@@ -60,7 +60,14 @@ pub fn issue_token_response_with_refresh_session(
 }
 
 pub fn issue_access_token(secret: &str, handle: &str, role: &str) -> Result<String, IdentityError> {
-    issue_token(secret, handle, role, TokenKind::Access, ACCESS_TOKEN_TTL_SECS, None)
+    issue_token(
+        secret,
+        handle,
+        role,
+        TokenKind::Access,
+        ACCESS_TOKEN_TTL_SECS,
+        None,
+    )
 }
 
 pub fn issue_refresh_token(
@@ -68,7 +75,14 @@ pub fn issue_refresh_token(
     handle: &str,
     role: &str,
 ) -> Result<String, IdentityError> {
-    issue_token(secret, handle, role, TokenKind::Refresh, REFRESH_TOKEN_TTL_SECS, None)
+    issue_token(
+        secret,
+        handle,
+        role,
+        TokenKind::Refresh,
+        REFRESH_TOKEN_TTL_SECS,
+        None,
+    )
 }
 
 pub fn issue_refresh_token_with_session(
@@ -122,7 +136,11 @@ fn issue_token(
     .map_err(|e| IdentityError::Internal(e.to_string()))
 }
 
-fn decode_token(secret: &str, token: &str, expected_kind: TokenKind) -> Result<ValidatedToken, IdentityError> {
+fn decode_token(
+    secret: &str,
+    token: &str,
+    expected_kind: TokenKind,
+) -> Result<ValidatedToken, IdentityError> {
     let claims = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),

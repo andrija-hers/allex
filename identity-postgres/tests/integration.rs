@@ -230,7 +230,10 @@ async fn refresh_returns_rotated_tokens() {
 
     assert_ne!(refreshed.token, resp.token);
     assert_ne!(refreshed.refresh_token, resp.refresh_token);
-    assert_eq!(store.validate_bearer(&refreshed.token), Some("user".to_string()));
+    assert_eq!(
+        store.validate_bearer(&refreshed.token),
+        Some("user".to_string())
+    );
 
     let err = store
         .refresh(RefreshRequest {
@@ -268,7 +271,10 @@ async fn refresh_rotation_survives_store_recreation() {
         })
         .await
         .unwrap();
-    assert_eq!(restarted.validate_bearer(&rotated_again.token), Some("user".to_string()));
+    assert_eq!(
+        restarted.validate_bearer(&rotated_again.token),
+        Some("user".to_string())
+    );
 }
 
 #[tokio::test]

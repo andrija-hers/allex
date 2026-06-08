@@ -161,7 +161,10 @@ async fn refresh_returns_rotated_tokens() {
 
     assert_ne!(refreshed.token, resp.token);
     assert_ne!(refreshed.refresh_token, resp.refresh_token);
-    assert_eq!(store.validate_bearer(&refreshed.token), Some("user".to_string()));
+    assert_eq!(
+        store.validate_bearer(&refreshed.token),
+        Some("user".to_string())
+    );
 
     let err = store
         .refresh(RefreshRequest {
