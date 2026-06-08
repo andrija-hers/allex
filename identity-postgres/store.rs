@@ -114,6 +114,7 @@ impl IdentityV1 for PostgresIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let db = self.db.clone();
         let secret = self.secret.clone();
+        let token_ttl_secs = self.token_ttl_secs;
         async move {
             let password = req.password.clone();
             let password_hash = tokio::task::spawn_blocking(move || {
@@ -145,7 +146,7 @@ impl IdentityV1 for PostgresIdentityStore {
             let store = PostgresIdentityStore {
                 db,
                 secret,
-                token_ttl_secs: 3600,
+                token_ttl_secs,
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&handle, &role)?;
@@ -163,6 +164,7 @@ impl IdentityV1 for PostgresIdentityStore {
     ) -> impl Future<Output = Result<TokenResponse, IdentityError>> + Send {
         let db = self.db.clone();
         let secret = self.secret.clone();
+        let token_ttl_secs = self.token_ttl_secs;
         async move {
             let client = db.get_client().await.map_err(db_err)?;
 
@@ -192,7 +194,7 @@ impl IdentityV1 for PostgresIdentityStore {
             let store = PostgresIdentityStore {
                 db,
                 secret,
-                token_ttl_secs: 3600,
+                token_ttl_secs,
                 revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             };
             let token = store.issue_jwt(&req.handle, &role)?;
