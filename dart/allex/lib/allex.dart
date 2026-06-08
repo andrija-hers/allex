@@ -7,5 +7,10 @@
 /// ```
 library allex;
 
-export 'src/transport.dart' show AllexTransport;
+export 'src/transport.dart'
+    show
+        AllexAuthFailure,
+        AllexBearerTokenProvider,
+        AllexBearerTokenRefresher,
+        AllexTransport;
 export 'src/types.dart' show AllexResult, AllexStep, AllexError;

@@ -1,6 +1,25 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'types.dart';
+
+typedef AllexBearerTokenProvider = FutureOr<String?> Function();
+typedef AllexBearerTokenRefresher =
+    FutureOr<bool> Function(AllexAuthFailure failure);
+
+class AllexAuthFailure {
+  final Uri uri;
+  final String module;
+  final String method;
+  final int statusCode;
+
+  const AllexAuthFailure({
+    required this.uri,
+    required this.module,
+    required this.method,
+    required this.statusCode,
+  });
+}
 
 /// Low-level transport for the allex RPC wire protocol.
 ///
@@ -15,12 +34,14 @@ import 'types.dart';
 /// whose value is a double-wrapped payload following the same byte encoding.
 class AllexTransport {
   final Uri baseUri;
-  final String Function()? bearerToken;
+  final AllexBearerTokenProvider? bearerToken;
+  final AllexBearerTokenRefresher? refreshBearerToken;
   final http.Client _client;
 
   AllexTransport({
     required this.baseUri,
     this.bearerToken,
+    this.refreshBearerToken,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
@@ -38,9 +59,9 @@ class AllexTransport {
     required E Function(dynamic json) decodeError,
   }) async {
     final body = _encodeRpcCall(module, method, request);
-    final response = await _client.post(
-      baseUri,
-      headers: _headers(),
+    final response = await _postWithAuthRetry(
+      module: module,
+      method: method,
       body: body,
     );
 
@@ -76,13 +97,18 @@ class AllexTransport {
     required E Function(dynamic json) decodeError,
   }) {
     return Stream.multi((controller) async {
-      while (!controller.isCanceled) {
-        try {
-          final httpRequest = http.Request('POST', baseUri);
-          httpRequest.headers.addAll(_headers());
-          httpRequest.body = _encodeRpcCall(module, method, request);
+      var isCanceled = false;
+      controller.onCancel = () {
+        isCanceled = true;
+      };
 
-          final streamed = await _client.send(httpRequest);
+      while (!isCanceled) {
+        try {
+          final streamed = await _sendWithAuthRetry(
+            module: module,
+            method: method,
+            body: _encodeRpcCall(module, method, request),
+          );
 
           if (streamed.statusCode != 200) {
             throw AllexError(
@@ -92,8 +118,7 @@ class AllexTransport {
           }
 
           final buffer = StringBuffer();
-          await for (final chunk in streamed.stream
-              .transform(utf8.decoder)) {
+          await for (final chunk in streamed.stream.transform(utf8.decoder)) {
             buffer.write(chunk);
             final text = buffer.toString();
             final lines = text.split('\n');
@@ -125,11 +150,11 @@ class AllexTransport {
         } on AllexError {
           rethrow;
         } catch (e) {
-          if (controller.isCanceled) return;
+          if (isCanceled) return;
           // Brief pause before reconnect to avoid hammering a failing server.
           await Future<void>.delayed(const Duration(seconds: 2));
         }
-        if (controller.isCanceled) return;
+        if (isCanceled) return;
         // Brief pause between reconnect attempts.
         await Future<void>.delayed(const Duration(seconds: 1));
       }
@@ -165,8 +190,70 @@ class AllexTransport {
     return outer;
   }
 
-  Map<String, String> _headers() => {
-        'Content-Type': 'application/json',
-        if (bearerToken != null) 'Authorization': 'Bearer ${bearerToken!()}',
-      };
+  Future<http.Response> _postWithAuthRetry({
+    required String module,
+    required String method,
+    required String body,
+  }) async {
+    final response = await _post(body);
+    if (!await _shouldRetryAuth(module, method, response.statusCode)) {
+      return response;
+    }
+
+    return _post(body);
+  }
+
+  Future<http.StreamedResponse> _sendWithAuthRetry({
+    required String module,
+    required String method,
+    required String body,
+  }) async {
+    final response = await _send(body);
+    if (!await _shouldRetryAuth(module, method, response.statusCode)) {
+      return response;
+    }
+
+    return _send(body);
+  }
+
+  Future<http.Response> _post(String body) async {
+    return _client.post(
+      baseUri,
+      headers: await _headers(),
+      body: body,
+    );
+  }
+
+  Future<http.StreamedResponse> _send(String body) async {
+    final httpRequest = http.Request('POST', baseUri);
+    httpRequest.headers.addAll(await _headers());
+    httpRequest.body = body;
+    return _client.send(httpRequest);
+  }
+
+  Future<bool> _shouldRetryAuth(
+    String module,
+    String method,
+    int statusCode,
+  ) async {
+    if (refreshBearerToken == null) return false;
+    if (statusCode != 401 && statusCode != 403) return false;
+
+    return await refreshBearerToken!(
+      AllexAuthFailure(
+        uri: baseUri,
+        module: module,
+        method: method,
+        statusCode: statusCode,
+      ),
+    );
+  }
+
+  Future<Map<String, String>> _headers() async {
+    final token = await bearerToken?.call();
+    return {
+      'Content-Type': 'application/json',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+  }
 }
