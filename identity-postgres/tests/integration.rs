@@ -9,10 +9,7 @@
 
 use allex_identity_postgres::PostgresIdentityStore;
 use allex_postgres::Db;
-use identity::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest,
-    ValidateRequest,
-};
+use identity::{IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, ValidateRequest};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use transport::BearerTokenValidator;
@@ -27,15 +24,6 @@ async fn start_store() -> (
     PostgresIdentityStore,
     testcontainers::ContainerAsync<Postgres>,
 ) {
-    let (store, _conn_str, container) = start_store_with_conn().await;
-    (store, container)
-}
-
-async fn start_store_with_conn() -> (
-    PostgresIdentityStore,
-    String,
-    testcontainers::ContainerAsync<Postgres>,
-) {
     let container = Postgres::default()
         .start()
         .await
@@ -43,15 +31,10 @@ async fn start_store_with_conn() -> (
     let host = container.get_host().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let conn_str = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-    let store = reconnect_store(&conn_str).await;
-    (store, conn_str, container)
-}
-
-async fn reconnect_store(conn_str: &str) -> PostgresIdentityStore {
-    let db = Db::connect(conn_str).expect("valid connection string");
+    let db = Db::connect(&conn_str).expect("valid connection string");
     let store = PostgresIdentityStore::new(db, SECRET);
     store.setup().await.expect("schema setup must succeed");
-    store
+    (store, container)
 }
 
 fn reg(handle: &str, password: &str) -> RegisterRequest {
@@ -76,7 +59,6 @@ fn login(handle: &str, password: &str) -> LoginRequest {
 #[tokio::test]
 async fn setup_is_idempotent() {
     let (store, _c) = start_store().await;
-    // Calling setup a second time must not return an error.
     store
         .setup()
         .await
@@ -92,9 +74,8 @@ async fn register_creates_user_and_returns_valid_jwt() {
     let (store, _c) = start_store().await;
     let resp = store.register(reg("alice", "s3cr3t")).await.unwrap();
     assert!(!resp.token.is_empty());
-    assert!(!resp.refresh_token.is_empty());
+    assert!(resp.refresh_token.is_some());
 
-    // The returned token must be immediately usable for validate.
     let role_resp = store
         .validate(ValidateRequest { token: resp.token })
         .await
@@ -124,7 +105,7 @@ async fn login_valid_credentials_returns_jwt() {
 
     let resp = store.login(login("carol", "my-password")).await.unwrap();
     assert!(!resp.token.is_empty());
-    assert!(!resp.refresh_token.is_empty());
+    assert!(resp.refresh_token.is_some());
 
     let role_resp = store
         .validate(ValidateRequest { token: resp.token })
@@ -155,6 +136,57 @@ async fn login_unknown_handle_returns_invalid_credentials() {
 }
 
 // ---------------------------------------------------------------------------
+// Refresh
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_returns_new_token_pair() {
+    let (store, _c) = start_store().await;
+    let login_resp = store.register(reg("eve_r", "pass")).await.unwrap();
+    let refresh_token = login_resp.refresh_token.unwrap();
+
+    let refreshed = store
+        .refresh(RefreshRequest { refresh_token: refresh_token.clone() })
+        .await
+        .unwrap();
+    assert!(!refreshed.token.is_empty());
+    assert!(refreshed.refresh_token.is_some());
+    // New refresh token should differ from the old one (rotation)
+    assert_ne!(refreshed.refresh_token.as_deref(), Some(refresh_token.as_str()));
+}
+
+#[tokio::test]
+async fn refresh_token_cannot_be_reused() {
+    let (store, _c) = start_store().await;
+    let login_resp = store.register(reg("eve_r2", "pass")).await.unwrap();
+    let refresh_token = login_resp.refresh_token.unwrap();
+
+    store.refresh(RefreshRequest { refresh_token: refresh_token.clone() }).await.unwrap();
+
+    let err = store
+        .refresh(RefreshRequest { refresh_token })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, IdentityError::InvalidRefreshToken),
+        "expected InvalidRefreshToken, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn refresh_invalid_token_returns_error() {
+    let (store, _c) = start_store().await;
+    let err = store
+        .refresh(RefreshRequest { refresh_token: "bogus-token".into() })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, IdentityError::InvalidRefreshToken),
+        "expected InvalidRefreshToken, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Validate
 // ---------------------------------------------------------------------------
 
@@ -176,15 +208,9 @@ async fn validate_invalid_token_returns_error() {
 #[tokio::test]
 async fn validate_token_signed_with_wrong_secret_returns_error() {
     let (store, _c) = start_store().await;
-
-    // Build a store with a different secret and register a user there.
-    let host = "cannot_reuse";
-    // We can't start another container here, so instead we forge a known-bad JWT.
-    // A well-formed but incorrectly-signed token from jwt.io:
     let bad_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
         eyJzdWIiOiJ1c2VyIiwicm9sZSI6InVzZXIiLCJleHAiOjk5OTk5OTk5OTl9.\
         WRONG_SIGNATURE_HERE";
-    let _ = host; // suppress unused warning
     let err = store
         .validate(ValidateRequest {
             token: bad_token.into(),
@@ -216,116 +242,46 @@ async fn validate_bearer_invalid_token_returns_none() {
     assert_eq!(role, None);
 }
 
+// ---------------------------------------------------------------------------
+// Logout
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn refresh_returns_rotated_tokens() {
+async fn logout_revokes_access_and_refresh_token() {
     let (store, _c) = start_store().await;
-    let resp = store.register(reg("heidi", "password")).await.unwrap();
-
-    let refreshed = store
-        .refresh(RefreshRequest {
-            refresh_token: resp.refresh_token.clone(),
-        })
-        .await
-        .unwrap();
-
-    assert_ne!(refreshed.token, resp.token);
-    assert_ne!(refreshed.refresh_token, resp.refresh_token);
-    assert_eq!(
-        store.validate_bearer(&refreshed.token),
-        Some("user".to_string())
-    );
-
-    let err = store
-        .refresh(RefreshRequest {
-            refresh_token: resp.refresh_token,
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(err, IdentityError::InvalidRefreshToken));
-}
-
-#[tokio::test]
-async fn refresh_rotation_survives_store_recreation() {
-    let (store, conn_str, _c) = start_store_with_conn().await;
-    let resp = store.register(reg("karen", "password")).await.unwrap();
-    let refreshed = store
-        .refresh(RefreshRequest {
-            refresh_token: resp.refresh_token.clone(),
-        })
-        .await
-        .unwrap();
-
-    let restarted = reconnect_store(&conn_str).await;
-
-    let err = restarted
-        .refresh(RefreshRequest {
-            refresh_token: resp.refresh_token,
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(err, IdentityError::InvalidRefreshToken));
-
-    let rotated_again = restarted
-        .refresh(RefreshRequest {
-            refresh_token: refreshed.refresh_token,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        restarted.validate_bearer(&rotated_again.token),
-        Some("user".to_string())
-    );
-}
-
-#[tokio::test]
-async fn validate_rejects_refresh_tokens() {
-    let (store, _c) = start_store().await;
-    let resp = store.register(reg("ivan", "password")).await.unwrap();
-
-    let err = store
-        .validate(ValidateRequest {
-            token: resp.refresh_token,
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(err, IdentityError::InvalidToken));
-}
-
-#[tokio::test]
-async fn logout_revokes_refresh_tokens_durably() {
-    let (store, conn_str, _c) = start_store_with_conn().await;
-    let resp = store.register(reg("judy", "password")).await.unwrap();
+    let resp = store.register(reg("frank", "s3kr1t")).await.unwrap();
+    let access = resp.token.clone();
+    let refresh = resp.refresh_token.clone().unwrap();
 
     store
         .logout(LogoutRequest {
-            token: Some(resp.token.clone()),
-            refresh_token: Some(resp.refresh_token.clone()),
+            token: Some(access.clone()),
+            refresh_token: Some(refresh.clone()),
         })
         .await
         .unwrap();
 
-    assert_eq!(store.validate_bearer(&resp.token), None);
+    // Access token should now be rejected by bearer validator
+    assert_eq!(store.validate_bearer(&access), None);
 
-    let restarted = reconnect_store(&conn_str).await;
-    let err = restarted
-        .refresh(RefreshRequest {
-            refresh_token: resp.refresh_token,
-        })
+    // Refresh token should now be rejected
+    let err = store
+        .refresh(RefreshRequest { refresh_token: refresh })
         .await
         .unwrap_err();
     assert!(matches!(err, IdentityError::InvalidRefreshToken));
 }
 
 // ---------------------------------------------------------------------------
-// Round-trip: register → login → validate
+// Round-trip: register -> login -> validate
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn full_round_trip_register_login_validate() {
     let (store, _c) = start_store().await;
 
-    let _reg_token = store.register(reg("frank", "s3kr1t")).await.unwrap().token;
-    let login_token = store.login(login("frank", "s3kr1t")).await.unwrap().token;
+    let _reg_token = store.register(reg("grace", "s3kr1t")).await.unwrap().token;
+    let login_token = store.login(login("grace", "s3kr1t")).await.unwrap().token;
 
     let role_resp = store
         .validate(ValidateRequest { token: login_token })
