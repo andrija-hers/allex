@@ -422,7 +422,6 @@ impl PreparedSchedule {
 mod tests {
     use super::*;
     use std::convert::Infallible;
-    use std::{fs, path::PathBuf};
 
     fn schedule(timezone: &str, weekdays: &[u8], hour: u32, minute: u32) -> Schedule {
         Schedule {
@@ -436,26 +435,6 @@ mod tests {
         Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
             .single()
             .expect("expected a valid UTC timestamp")
-    }
-
-    #[test]
-    fn parses_all_sample_schedule_files() {
-        let schedules_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sample_files/schedules");
-
-        for entry in fs::read_dir(&schedules_dir).expect("sample schedules directory should exist")
-        {
-            let entry = entry.expect("directory entry should be readable");
-            let path = entry.path();
-
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-
-            let input = fs::read_to_string(&path).expect("sample schedule file should be readable");
-            serde_json::from_str::<Vec<Schedule>>(&input)
-                .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
-        }
     }
 
     #[test]

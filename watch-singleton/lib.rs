@@ -109,7 +109,7 @@ impl<C: Send + Sync + 'static> WatchSingleton<C> {
     /// # Panics
     /// Panics if [`init`](Self::init) has not been called.
     pub fn reload(&self, value: C) {
-        self.sender().send(Arc::new(value)).ok();
+        self.sender().send_replace(Arc::new(value));
     }
 
     /// Low-level: subscribe to raw change notifications.

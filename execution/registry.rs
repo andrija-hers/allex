@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 
 use crate::{MethodExecutor, ModuleExecutor, RelayedModuleExecutor};
+use transport::tracing::{debug, debug_span, warn};
 use transport::{Error, Payload, Result};
 
 /// In-memory registry of module executors and relayed server executors.
@@ -40,9 +41,25 @@ impl ModuleExecutor for Registry {
         payload: Payload,
         caller_role: Option<&str>,
     ) -> Result<Payload> {
+        let payload_bytes = payload.len();
+        let caller_role = caller_role.unwrap_or("anonymous");
+        let span = debug_span!(
+            "allex.registry.module_execute",
+            rpc_module = module,
+            rpc_method = method,
+            payload_bytes,
+            caller_role,
+        );
+        let _guard = span.enter();
         match self.modules.get(module) {
-            Some(executor) => executor.execute(method, payload, caller_role).await,
-            None => Err(Error::ModuleNotFound),
+            Some(executor) => {
+                debug!("dispatching to registered module executor");
+                executor.execute(method, payload, Some(caller_role)).await
+            }
+            None => {
+                warn!("module executor not found");
+                Err(Error::ModuleNotFound)
+            }
         }
     }
 }
@@ -57,9 +74,28 @@ impl RelayedModuleExecutor for Registry {
         payload: Payload,
         caller_role: Option<&str>,
     ) -> Result<Payload> {
+        let payload_bytes = payload.len();
+        let caller_role = caller_role.unwrap_or("anonymous");
+        let span = debug_span!(
+            "allex.registry.relayed_execute",
+            rpc_server = server,
+            rpc_module = module,
+            rpc_method = method,
+            payload_bytes,
+            caller_role,
+        );
+        let _guard = span.enter();
         match self.servers.get(server) {
-            Some(executor) => executor.execute(module, method, payload, caller_role).await,
-            None => Err(Error::ServerNotFound),
+            Some(executor) => {
+                debug!("dispatching to registered upstream server executor");
+                executor
+                    .execute(module, method, payload, Some(caller_role))
+                    .await
+            }
+            None => {
+                warn!("upstream server executor not found");
+                Err(Error::ServerNotFound)
+            }
         }
     }
 }

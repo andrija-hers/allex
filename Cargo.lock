@@ -129,6 +129,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-state"
+version = "0.1.0"
+dependencies = [
+ "allex-state-macro",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "allex-state-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "allex-transport"
 version = "0.1.0"
 dependencies = [
@@ -142,6 +160,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
+ "tracing",
  "uuid",
 ]
 
@@ -2566,16 +2585,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "state"
-version = "0.1.0"
-dependencies = [
- "allex-progressable-future",
- "allex-transport",
- "tokio",
- "tokio-stream",
-]
 
 [[package]]
 name = "stringprep"

@@ -1,5 +1,5 @@
 [package]
-name = "state"
+name = "allex-state"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,6 @@ edition = "2024"
 path = "./lib.rs"
 
 [dependencies]
-progressable-future = {path = "../progressable-future", package="allex-progressable-future"}
-transport = {path = "../transport", package = "allex-transport"}
+allex-state-macro = { path = "../state-macro" }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

@@ -26,9 +26,9 @@ use crate::{
     ServerSideOneShotTransport, ServerSideOneShotTransportItem,
 };
 
-/// Implemented by anything that can verify a Bearer JWT and return the corresponding role.
+/// Implemented by anything that can verify a Bearer JWT and return the authenticated caller.
 pub trait BearerTokenValidator: Send + Sync {
-    /// Validates a bearer token and returns the authenticated caller role on success.
+    /// Validates a bearer token and returns `handle<RS>role` on success.
     fn validate_bearer(&self, token: &str) -> Option<String>;
 }
 

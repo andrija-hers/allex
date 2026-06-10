@@ -14,6 +14,7 @@ use axum::{
 use futures::{Stream, StreamExt};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, debug_span, error, warn};
 
 /// Axum-backed server transport for unary and streamed HTTP RPC requests.
 pub struct AxumTransport<C: UnaryCodec> {
@@ -110,9 +111,7 @@ impl<C: UnaryCodec> ServerSideOneShotTransport for AxumTransport<C> {
         let rx = match guard.take() {
             Some(rx) => rx,
             None => {
-                eprintln!(
-                    "[axum] get_incoming_stream called more than once — returning empty stream"
-                );
+                warn!("get_incoming_stream called more than once; returning empty stream");
                 let (_, rx) = mpsc::channel(1);
                 rx
             }
@@ -136,10 +135,18 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         State(tx): State<mpsc::Sender<AxumOneShotItem>>,
         body: Bytes,
     ) -> Response {
+        let request_span = debug_span!(
+            "allex.transport.axum.request",
+            authenticated = false,
+            request_bytes = body.len(),
+        );
+        let _guard = request_span.enter();
+        debug!("received unary axum rpc request");
         // 1. Decode request body
         let payload = match C::decode::<Payload>(&body) {
             Ok(payload) => payload,
             Err(err) => {
+                warn!(error = ?err, "could not decode request payload");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("Could not decode request payload: {err:?}"),
@@ -158,6 +165,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         };
 
         if tx.send(item).await.is_err() {
+            error!("transport receiver is not available");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Transport receiver is not available",
@@ -168,6 +176,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         let response = match response_rx.await {
             Ok(payload) => payload,
             Err(_) => {
+                error!("server-side handler dropped the response channel");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Server-side handler dropped the response channel",
@@ -177,43 +186,64 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
 
         // 5. Encode response and return as HTTP body
         match response {
-            AxumResponse::Unary(response_payload) => match C::encode(&response_payload) {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [(CONTENT_TYPE, C::content_type())],
-                    bytes.get_bytes_forever(),
-                )
-                    .into_response(),
-                Err(err) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Could not encode response payload: {err:?}"),
-                ),
-            },
-            AxumResponse::Stream(stream) => (
-                StatusCode::OK,
-                [(CONTENT_TYPE, "application/x-ndjson")],
-                Body::from_stream(stream.filter_map(|response| async move {
-                    match encode_call_response::<C>(&response) {
-                        Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
-                        Err(e) => {
-                            eprintln!("[axum] stream encode error: {e:?}");
-                            None
-                        }
+            AxumResponse::Unary(response_payload) => {
+                debug!(response_kind = "unary", "sending unary axum rpc response");
+                match C::encode(&response_payload) {
+                    Ok(bytes) => (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, C::content_type())],
+                        bytes.get_bytes_forever(),
+                    )
+                        .into_response(),
+                    Err(err) => {
+                        error!(error = ?err, "could not encode response payload");
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Could not encode response payload: {err:?}"),
+                        )
                     }
-                })),
-            )
-                .into_response(),
+                }
+            }
+            AxumResponse::Stream(stream) => {
+                debug!(
+                    response_kind = "stream",
+                    "sending streaming axum rpc response"
+                );
+                (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "application/x-ndjson")],
+                    Body::from_stream(stream.filter_map(|response| async move {
+                        match encode_call_response::<C>(&response) {
+                            Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
+                            Err(e) => {
+                                warn!(error = ?e, "stream encode error");
+                                None
+                            }
+                        }
+                    })),
+                )
+                    .into_response()
+            }
             // Return the encoded application error bytes directly so non-Rust HTTP clients
             // see readable JSON instead of the transport's outer byte-array wrapper.
-            AxumResponse::AppError(response_payload) => app_error_response::<C>(response_payload),
+            AxumResponse::AppError(response_payload) => {
+                debug!(
+                    response_kind = "app_error",
+                    "sending application error response"
+                );
+                app_error_response::<C>(response_payload)
+            }
             // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the unauthenticated handler.
-            AxumResponse::TransportError(error) => match error {
-                Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
-                _ => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Transport error: {error:?}"),
-                ),
-            },
+            AxumResponse::TransportError(error) => {
+                warn!(response_kind = "transport_error", transport_error = ?error, "sending transport error response");
+                match error {
+                    Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                    _ => error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Transport error: {error:?}"),
+                    ),
+                }
+            }
         }
     }
 }
@@ -256,10 +286,19 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .and_then(|token| state.validator.validate_bearer(token));
+        let request_span = debug_span!(
+            "allex.transport.axum.request",
+            authenticated = true,
+            caller_role = caller_role.as_deref().unwrap_or("anonymous"),
+            request_bytes = body.len(),
+        );
+        let _guard = request_span.enter();
+        debug!("received authenticated axum rpc request");
 
         let payload = match C::decode::<Payload>(&body) {
             Ok(p) => p,
             Err(err) => {
+                warn!(error = ?err, "could not decode request payload");
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("Could not decode request payload: {err:?}"),
@@ -275,6 +314,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         };
 
         if state.tx.send(item).await.is_err() {
+            error!("transport receiver is not available");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Transport receiver is not available",
@@ -282,49 +322,68 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
         }
 
         match response_rx.await {
-            Ok(AxumResponse::Unary(response_payload)) => match C::encode(&response_payload) {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [(CONTENT_TYPE, C::content_type())],
-                    bytes.get_bytes_forever(),
-                )
-                    .into_response(),
-                Err(err) => error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Could not encode response payload: {err:?}"),
-                ),
-            },
-            Ok(AxumResponse::Stream(stream)) => (
-                StatusCode::OK,
-                [(CONTENT_TYPE, "application/x-ndjson")],
-                Body::from_stream(stream.filter_map(|response| async move {
-                    match encode_call_response::<C>(&response) {
-                        Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
-                        Err(e) => {
-                            eprintln!("[axum] stream encode error: {e:?}");
-                            None
-                        }
+            Ok(AxumResponse::Unary(response_payload)) => {
+                debug!(response_kind = "unary", "sending unary axum rpc response");
+                match C::encode(&response_payload) {
+                    Ok(bytes) => (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, C::content_type())],
+                        bytes.get_bytes_forever(),
+                    )
+                        .into_response(),
+                    Err(err) => {
+                        error!(error = ?err, "could not encode response payload");
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Could not encode response payload: {err:?}"),
+                        )
                     }
-                })),
-            )
-                .into_response(),
-            // Return the encoded application error bytes directly so non-Rust HTTP clients
-            // see readable JSON instead of the transport's outer byte-array wrapper.
+                }
+            }
+            Ok(AxumResponse::Stream(stream)) => {
+                debug!(
+                    response_kind = "stream",
+                    "sending streaming axum rpc response"
+                );
+                (
+                    StatusCode::OK,
+                    [(CONTENT_TYPE, "application/x-ndjson")],
+                    Body::from_stream(stream.filter_map(|response| async move {
+                        match encode_call_response::<C>(&response) {
+                            Ok(bytes) => Some(Ok::<Bytes, Infallible>(bytes)),
+                            Err(e) => {
+                                warn!(error = ?e, "stream encode error");
+                                None
+                            }
+                        }
+                    })),
+                )
+                    .into_response()
+            }
             Ok(AxumResponse::AppError(response_payload)) => {
+                debug!(
+                    response_kind = "app_error",
+                    "sending application error response"
+                );
                 app_error_response::<C>(response_payload)
             }
-            // Agent Change 06/04/2026: Maps TransportError::AccessForbidden to HTTP 403 in the authenticated handler.
-            Ok(AxumResponse::TransportError(error)) => match error {
-                Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
-                _ => error_response(
+            Ok(AxumResponse::TransportError(error)) => {
+                warn!(response_kind = "transport_error", transport_error = ?error, "sending transport error response");
+                match error {
+                    Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                    _ => error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Transport error: {error:?}"),
+                    ),
+                }
+            }
+            Err(_) => {
+                error!("server-side handler dropped the response channel");
+                error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Transport error: {error:?}"),
-                ),
-            },
-            Err(_) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Server-side handler dropped the response channel",
-            ),
+                    "Server-side handler dropped the response channel",
+                )
+            }
         }
     }
 }

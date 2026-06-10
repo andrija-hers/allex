@@ -121,10 +121,10 @@ async fn validate_invalid_token_returns_error() {
 }
 
 #[tokio::test]
-async fn validate_bearer_valid_token_returns_role() {
+async fn validate_bearer_valid_token_returns_identity() {
     let (store, _dir) = start_store().await;
     let resp = store.register(reg("eve", "password")).await.unwrap();
-    assert_eq!(store.validate_bearer(&resp.token), Some("user".to_string()));
+    assert_eq!(store.validate_bearer(&resp.token), Some("eve\x1euser".to_string()));
 }
 
 #[tokio::test]
