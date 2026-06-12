@@ -317,6 +317,6 @@ impl BearerTokenValidator for PostgresIdentityStore {
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| c.role)
+        self.decode_jwt(token).map(|c| format!("{}\x1e{}", c.sub, c.role))
     }
 }

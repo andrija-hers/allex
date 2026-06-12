@@ -232,7 +232,11 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             /// Anonymous callers (`None`) are only permitted on `#[public]` methods.
             pub fn is_authorized(method: &str, caller_role: ::std::option::Option<&str>) -> bool {
                 match caller_role {
-                    ::std::option::Option::Some(role) => Self::is_role_allowed(method, role),
+                    ::std::option::Option::Some(encoded) => {
+                        // caller_role is encoded as 'handle RS role'; extract the role part.
+                        let role = encoded.split('').nth(1).unwrap_or(encoded);
+                        Self::is_role_allowed(method, role)
+                    }
                     ::std::option::Option::None => Self::is_public(method),
                 }
             }
