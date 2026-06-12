@@ -21,6 +21,7 @@
 pub use allex_state_macro::State;
 pub use allex_state_macro::state_type;
 
+use progressable_future::{ProgressSender, ProgressableFuture};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tokio_stream::{Stream, wrappers::WatchStream};
@@ -71,6 +72,15 @@ impl<S: HasUpdate> LocalState<S> {
         }
     }
 
+    /// Replace the entire state with a new value, always broadcasting.
+    ///
+    /// Use this for bulk rebuilds (structural vec changes, initial publish).
+    /// For targeted field-level changes prefer [`apply`] so unchanged-value
+    /// suppression works.
+    pub fn replace(&self, new_state: S) {
+        self.tx.send_modify(|state| *state = new_state);
+    }
+
     /// Mutate via a closure that returns `Option<Update>`.  Useful for
     /// compound mutations where you want to read and write in one step.
     pub fn mutate<F>(&self, f: F)
@@ -109,6 +119,47 @@ impl<S: HasUpdate> LocalState<S> {
     /// `changed()` / `borrow_and_update()` semantics.
     pub fn subscribe_receiver(&self) -> watch::Receiver<S> {
         self.tx.subscribe()
+    }
+
+    /// Stream state updates as a [`ProgressableFuture`] that never terminates
+    /// normally (`T = Infallible`).  Each state change is mapped to a progress
+    /// value `P` via `map`.  The stream errors with `E` only if the watch
+    /// channel closes (i.e. the owning task dropped `LocalState`).
+    ///
+    /// Encapsulates the `current()` + `subscribe_receiver()` + flush-race-guard
+    /// pattern so every "billboard" RPC endpoint is a one-liner.
+    ///
+    /// # Example
+    /// ```ignore
+    /// state.watch_progressable(|snap| build_response(snap), || StateClosedError)
+    /// ```
+    pub fn watch_progressable<P, T, E, FM, FE>(
+        &self,
+        map: FM,
+        on_closed: FE,
+    ) -> ProgressableFuture<P, T, E>
+    where
+        P: Send + 'static,
+        T: From<std::convert::Infallible> + Send + 'static,
+        E: Send + 'static,
+        FM: Fn(S) -> P + Send + 'static,
+        FE: FnOnce() -> E + Send + 'static,
+    {
+        // Subscribe before reading current so no update is missed.
+        // borrow_and_update() both returns the current value and marks it as
+        // "seen", so the first changed() only fires on a genuine new change.
+        let mut receiver = self.tx.subscribe();
+        ProgressableFuture::new(move |sender: ProgressSender<P>| async move {
+            let initial = receiver.borrow_and_update().clone();
+            sender.progress(map(initial));
+            loop {
+                if receiver.changed().await.is_err() {
+                    return Err(on_closed());
+                }
+                let snap = receiver.borrow_and_update().clone();
+                sender.progress(map(snap));
+            }
+        })
     }
 }
 
@@ -159,10 +210,7 @@ where
 
     /// Compose with a deeper lifting function to create a handle for an even
     /// lower level of the tree.
-    pub fn nested<Deeper, F>(
-        &self,
-        lift_deeper: F,
-    ) -> StateHandle<Root, Deeper>
+    pub fn nested<Deeper, F>(&self, lift_deeper: F) -> StateHandle<Root, Deeper>
     where
         Deeper: Clone + Send + Sync + 'static,
         F: Fn(Deeper) -> LeafUpdate + Send + Sync + 'static,
@@ -241,12 +289,16 @@ mod tests {
 
     impl Counter {
         fn set_value(&mut self, v: i32) -> Option<CounterUpdate> {
-            if self.value == v { return None; }
+            if self.value == v {
+                return None;
+            }
             self.value = v;
             Some(CounterUpdate::ValueChanged(v))
         }
         fn set_label(&mut self, s: String) -> Option<CounterUpdate> {
-            if self.label == s { return None; }
+            if self.label == s {
+                return None;
+            }
             self.label = s.clone();
             Some(CounterUpdate::LabelChanged(s))
         }
@@ -254,7 +306,10 @@ mod tests {
 
     #[tokio::test]
     async fn apply_none_does_not_broadcast() {
-        let state = LocalState::new(Counter { value: 0, label: "x".into() });
+        let state = LocalState::new(Counter {
+            value: 0,
+            label: "x".into(),
+        });
         let mut rx = state.tx.subscribe();
         // consume the initial "changed" marker
         let _ = rx.borrow_and_update();
@@ -266,7 +321,10 @@ mod tests {
 
     #[tokio::test]
     async fn apply_some_broadcasts() {
-        let state = LocalState::new(Counter { value: 0, label: "x".into() });
+        let state = LocalState::new(Counter {
+            value: 0,
+            label: "x".into(),
+        });
         let mut rx = state.tx.subscribe();
         let _ = rx.borrow_and_update();
 
@@ -282,7 +340,10 @@ mod tests {
 
     #[tokio::test]
     async fn set_suppresses_duplicate() {
-        let state = LocalState::new(Counter { value: 5, label: "x".into() });
+        let state = LocalState::new(Counter {
+            value: 5,
+            label: "x".into(),
+        });
         let mut rx = state.tx.subscribe();
         let _ = rx.borrow_and_update();
 
@@ -315,7 +376,12 @@ mod tests {
             }
         }
 
-        let state = LocalState::new(Root { counter: Counter { value: 0, label: "y".into() } });
+        let state = LocalState::new(Root {
+            counter: Counter {
+                value: 0,
+                label: "y".into(),
+            },
+        });
         let handle = StateHandle::new(state.clone(), RootUpdate::Counter);
 
         let child_update = {
@@ -329,7 +395,10 @@ mod tests {
 
     #[tokio::test]
     async fn remote_state_mirrors_local() {
-        let local = LocalState::new(Counter { value: 0, label: "z".into() });
+        let local = LocalState::new(Counter {
+            value: 0,
+            label: "z".into(),
+        });
         let remote = RemoteState::new(&local).await;
 
         let update = {
@@ -345,46 +414,70 @@ mod tests {
     #[tokio::test]
     async fn nested_handle_composes() {
         #[derive(Clone, Debug, PartialEq)]
-        struct Inner { x: i32 }
+        struct Inner {
+            x: i32,
+        }
         #[derive(Clone, Debug)]
-        enum InnerUpdate { XChanged(i32) }
+        enum InnerUpdate {
+            XChanged(i32),
+        }
         impl HasUpdate for Inner {
             type Update = InnerUpdate;
             fn apply_update(&mut self, u: InnerUpdate) {
-                match u { InnerUpdate::XChanged(v) => self.x = v }
+                match u {
+                    InnerUpdate::XChanged(v) => self.x = v,
+                }
             }
         }
         impl Inner {
             fn set_x(&mut self, v: i32) -> Option<InnerUpdate> {
-                if self.x == v { return None; }
+                if self.x == v {
+                    return None;
+                }
                 self.x = v;
                 Some(InnerUpdate::XChanged(v))
             }
         }
 
         #[derive(Clone, Debug, PartialEq)]
-        struct Mid { inner: Inner }
+        struct Mid {
+            inner: Inner,
+        }
         #[derive(Clone, Debug)]
-        enum MidUpdate { Inner(InnerUpdate) }
+        enum MidUpdate {
+            Inner(InnerUpdate),
+        }
         impl HasUpdate for Mid {
             type Update = MidUpdate;
             fn apply_update(&mut self, u: MidUpdate) {
-                match u { MidUpdate::Inner(u) => self.inner.apply_update(u) }
+                match u {
+                    MidUpdate::Inner(u) => self.inner.apply_update(u),
+                }
             }
         }
 
         #[derive(Clone, Debug, PartialEq)]
-        struct Root { mid: Mid }
+        struct Root {
+            mid: Mid,
+        }
         #[derive(Clone, Debug)]
-        enum RootUpdate { Mid(MidUpdate) }
+        enum RootUpdate {
+            Mid(MidUpdate),
+        }
         impl HasUpdate for Root {
             type Update = RootUpdate;
             fn apply_update(&mut self, u: RootUpdate) {
-                match u { RootUpdate::Mid(u) => self.mid.apply_update(u) }
+                match u {
+                    RootUpdate::Mid(u) => self.mid.apply_update(u),
+                }
             }
         }
 
-        let state = LocalState::new(Root { mid: Mid { inner: Inner { x: 0 } } });
+        let state = LocalState::new(Root {
+            mid: Mid {
+                inner: Inner { x: 0 },
+            },
+        });
         let mid_handle = StateHandle::new(state.clone(), RootUpdate::Mid);
         let inner_handle = mid_handle.nested(MidUpdate::Inner);
 

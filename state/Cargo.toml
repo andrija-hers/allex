@@ -8,5 +8,6 @@ path = "./lib.rs"
 
 [dependencies]
 allex-state-macro = { path = "../state-macro" }
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

@@ -6,6 +6,11 @@ use std::{
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use message_templates::{
+    ForgotPasswordMessageRequest, ForgotPasswordMessageResponse, RenderMessageTemplateRequest,
+    RenderedMessageResponse, TemplateChannel, TemplateError, UpsertMessageTemplateRequest,
+    render_stored_template,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use transport::BearerTokenValidator;
@@ -35,6 +40,8 @@ struct IdentityStoreInner {
     revoked_tokens: Arc<Mutex<HashSet<String>>>,
     // refresh_token -> (handle, role, expiry_unix_secs)
     refresh_tokens: Arc<Mutex<HashMap<String, (String, String, u64)>>>,
+    // (template_key, channel) -> template body
+    templates: Arc<Mutex<HashMap<(String, TemplateChannel), String>>>,
 }
 
 /// An in-memory identity store supporting register, login, JWT validation, and logout.
@@ -59,7 +66,55 @@ impl InMemoryIdentityStore {
             users: Arc::new(Mutex::new(HashMap::new())),
             revoked_tokens: Arc::new(Mutex::new(HashSet::new())),
             refresh_tokens: Arc::new(Mutex::new(HashMap::new())),
+            templates: Arc::new(Mutex::new(HashMap::new())),
         }))
+    }
+
+    pub async fn upsert_message_template(
+        &self,
+        req: UpsertMessageTemplateRequest,
+    ) -> Result<(), TemplateError> {
+        self.0
+            .templates
+            .lock()
+            .await
+            .insert((req.template_key, req.channel), req.body);
+        Ok(())
+    }
+
+    pub async fn render_message_template(
+        &self,
+        req: RenderMessageTemplateRequest,
+    ) -> Result<RenderedMessageResponse, TemplateError> {
+        let template = self
+            .0
+            .templates
+            .lock()
+            .await
+            .get(&(req.template_key, req.channel))
+            .cloned()
+            .ok_or(TemplateError::NotFound)?;
+        let message = render_stored_template(&template, &req.data)?;
+        Ok(RenderedMessageResponse { message })
+    }
+
+    pub async fn build_forgot_password_message(
+        &self,
+        req: ForgotPasswordMessageRequest,
+    ) -> Result<ForgotPasswordMessageResponse, TemplateError> {
+        let rendered = self
+            .render_message_template(RenderMessageTemplateRequest {
+                template_key: "forgot_password".into(),
+                channel: req.channel,
+                data: serde_json::json!({
+                    "handle": req.handle,
+                    "reset_url": req.reset_url,
+                }),
+            })
+            .await?;
+        Ok(ForgotPasswordMessageResponse {
+            message: rendered.message,
+        })
     }
 
     fn decode_jwt(&self, token: &str) -> Option<Claims> {
@@ -74,7 +129,11 @@ impl InMemoryIdentityStore {
 
     fn issue_jwt(&self, handle: &str, role: &str) -> Result<String, IdentityError> {
         let exp = now_secs() + self.0.token_ttl_secs as usize;
-        let claims = Claims { sub: handle.to_owned(), role: role.to_owned(), exp };
+        let claims = Claims {
+            sub: handle.to_owned(),
+            role: role.to_owned(),
+            exp,
+        };
         encode(
             &Header::default(),
             &claims,
@@ -86,10 +145,11 @@ impl InMemoryIdentityStore {
     async fn issue_refresh_token(&self, handle: &str, role: &str) -> String {
         let token = new_opaque_token();
         let expiry = now_secs() as u64 + self.0.refresh_token_ttl_secs;
-        self.0.refresh_tokens.lock().await.insert(
-            token.clone(),
-            (handle.to_owned(), role.to_owned(), expiry),
-        );
+        self.0
+            .refresh_tokens
+            .lock()
+            .await
+            .insert(token.clone(), (handle.to_owned(), role.to_owned(), expiry));
         token
     }
 }
@@ -133,7 +193,10 @@ impl IdentityV1 for InMemoryIdentityStore {
             }
             users.insert(
                 req.handle.clone(),
-                StoredUser { password_hash, role: req.role.clone() },
+                StoredUser {
+                    password_hash,
+                    role: req.role.clone(),
+                },
             );
             drop(users);
 
@@ -195,9 +258,7 @@ impl IdentityV1 for InMemoryIdentityStore {
             let (handle, role) = {
                 let mut refresh_tokens = inner.refresh_tokens.lock().await;
                 match refresh_tokens.get(&req.refresh_token) {
-                    Some((h, r, expiry)) if *expiry > now_secs() as u64 => {
-                        (h.clone(), r.clone())
-                    }
+                    Some((h, r, expiry)) if *expiry > now_secs() as u64 => (h.clone(), r.clone()),
                     _ => {
                         refresh_tokens.remove(&req.refresh_token);
                         return Err(IdentityError::InvalidRefreshToken);
@@ -264,6 +325,7 @@ impl BearerTokenValidator for InMemoryIdentityStore {
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| format!("{}\x1e{}", c.sub, c.role))
+        self.decode_jwt(token)
+            .map(|c| format!("{}\x1e{}", c.sub, c.role))
     }
 }

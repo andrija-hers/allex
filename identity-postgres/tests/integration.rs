@@ -9,7 +9,13 @@
 
 use allex_identity_postgres::PostgresIdentityStore;
 use allex_postgres::Db;
-use identity::{IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, ValidateRequest};
+use identity::{
+    IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest,
+    ValidateRequest,
+};
+use message_templates::{
+    ForgotPasswordMessageRequest, TemplateChannel, UpsertMessageTemplateRequest,
+};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use transport::BearerTokenValidator;
@@ -146,13 +152,18 @@ async fn refresh_returns_new_token_pair() {
     let refresh_token = login_resp.refresh_token.unwrap();
 
     let refreshed = store
-        .refresh(RefreshRequest { refresh_token: refresh_token.clone() })
+        .refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        })
         .await
         .unwrap();
     assert!(!refreshed.token.is_empty());
     assert!(refreshed.refresh_token.is_some());
     // New refresh token should differ from the old one (rotation)
-    assert_ne!(refreshed.refresh_token.as_deref(), Some(refresh_token.as_str()));
+    assert_ne!(
+        refreshed.refresh_token.as_deref(),
+        Some(refresh_token.as_str())
+    );
 }
 
 #[tokio::test]
@@ -161,7 +172,12 @@ async fn refresh_token_cannot_be_reused() {
     let login_resp = store.register(reg("eve_r2", "pass")).await.unwrap();
     let refresh_token = login_resp.refresh_token.unwrap();
 
-    store.refresh(RefreshRequest { refresh_token: refresh_token.clone() }).await.unwrap();
+    store
+        .refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        })
+        .await
+        .unwrap();
 
     let err = store
         .refresh(RefreshRequest { refresh_token })
@@ -177,7 +193,9 @@ async fn refresh_token_cannot_be_reused() {
 async fn refresh_invalid_token_returns_error() {
     let (store, _c) = start_store().await;
     let err = store
-        .refresh(RefreshRequest { refresh_token: "bogus-token".into() })
+        .refresh(RefreshRequest {
+            refresh_token: "bogus-token".into(),
+        })
         .await
         .unwrap_err();
     assert!(
@@ -266,7 +284,9 @@ async fn logout_revokes_access_and_refresh_token() {
 
     // Refresh token should now be rejected
     let err = store
-        .refresh(RefreshRequest { refresh_token: refresh })
+        .refresh(RefreshRequest {
+            refresh_token: refresh,
+        })
         .await
         .unwrap_err();
     assert!(matches!(err, IdentityError::InvalidRefreshToken));
@@ -288,4 +308,31 @@ async fn full_round_trip_register_login_validate() {
         .await
         .unwrap();
     assert_eq!(role_resp.role, "user");
+}
+
+#[tokio::test]
+async fn forgot_password_template_is_loaded_from_storage() {
+    let (store, _c) = start_store().await;
+    store
+        .upsert_message_template(UpsertMessageTemplateRequest {
+            template_key: "forgot_password".into(),
+            channel: TemplateChannel::Email,
+            body: "Hi {{ handle }}, reset password via {{ reset_url }}".into(),
+        })
+        .await
+        .unwrap();
+
+    let msg = store
+        .build_forgot_password_message(ForgotPasswordMessageRequest {
+            handle: "alice".into(),
+            channel: TemplateChannel::Email,
+            reset_url: "https://example/reset?t=abc".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        msg.message,
+        "Hi alice, reset password via https://example/reset?t=abc"
+    );
 }

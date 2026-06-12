@@ -7,6 +7,10 @@ use std::{
 use allex_postgres::Db;
 use bcrypt::{DEFAULT_COST, hash, verify};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use message_templates::{
+    ForgotPasswordMessageRequest, ForgotPasswordMessageResponse, RenderMessageTemplateRequest,
+    RenderedMessageResponse, TemplateError, UpsertMessageTemplateRequest, render_stored_template,
+};
 use serde::{Deserialize, Serialize};
 use transport::BearerTokenValidator;
 
@@ -14,6 +18,8 @@ use identity::{
     IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
     RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
 };
+
+const FORGOT_PASSWORD_TEMPLATE_KEY: &str = "forgot_password";
 
 #[derive(Serialize, Deserialize)]
 struct Claims {
@@ -84,9 +90,85 @@ impl PostgresIdentityStore {
                         &[],
                     )
                     .await?;
+                client
+                    .execute(
+                        "CREATE TABLE IF NOT EXISTS message_templates (
+                            template_key TEXT NOT NULL,
+                            channel      TEXT NOT NULL,
+                            body         TEXT NOT NULL,
+                            PRIMARY KEY (template_key, channel)
+                        )",
+                        &[],
+                    )
+                    .await?;
                 Ok(())
             })
             .await
+    }
+
+    pub async fn upsert_message_template(
+        &self,
+        req: UpsertMessageTemplateRequest,
+    ) -> Result<(), TemplateError> {
+        let client = self
+            .db
+            .get_client()
+            .await
+            .map_err(|e| TemplateError::Storage(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO message_templates (template_key, channel, body)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (template_key, channel)
+                 DO UPDATE SET body = EXCLUDED.body",
+                &[&req.template_key, &req.channel.as_str(), &req.body],
+            )
+            .await
+            .map_err(|e| TemplateError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn render_message_template(
+        &self,
+        req: RenderMessageTemplateRequest,
+    ) -> Result<RenderedMessageResponse, TemplateError> {
+        let client = self
+            .db
+            .get_client()
+            .await
+            .map_err(|e| TemplateError::Storage(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT body FROM message_templates WHERE template_key = $1 AND channel = $2",
+                &[&req.template_key, &req.channel.as_str()],
+            )
+            .await
+            .map_err(|e| TemplateError::Storage(e.to_string()))?
+            .ok_or(TemplateError::NotFound)?;
+        let body: String = row
+            .try_get("body")
+            .map_err(|e| TemplateError::Storage(e.to_string()))?;
+        let message = render_stored_template(&body, &req.data)?;
+        Ok(RenderedMessageResponse { message })
+    }
+
+    pub async fn build_forgot_password_message(
+        &self,
+        req: ForgotPasswordMessageRequest,
+    ) -> Result<ForgotPasswordMessageResponse, TemplateError> {
+        let rendered = self
+            .render_message_template(RenderMessageTemplateRequest {
+                template_key: FORGOT_PASSWORD_TEMPLATE_KEY.into(),
+                channel: req.channel,
+                data: serde_json::json!({
+                    "handle": req.handle,
+                    "reset_url": req.reset_url,
+                }),
+            })
+            .await?;
+        Ok(ForgotPasswordMessageResponse {
+            message: rendered.message,
+        })
     }
 
     fn decode_jwt(&self, token: &str) -> Option<Claims> {
@@ -103,7 +185,11 @@ impl PostgresIdentityStore {
 
     fn issue_jwt(&self, sub: &str, role: &str) -> Result<String, IdentityError> {
         let exp = now_secs() + self.token_ttl_secs as usize;
-        let claims = Claims { sub: sub.to_string(), role: role.to_string(), exp };
+        let claims = Claims {
+            sub: sub.to_string(),
+            role: role.to_string(),
+            exp,
+        };
         encode(
             &Header::default(),
             &claims,
@@ -181,7 +267,12 @@ impl IdentityV1 for PostgresIdentityStore {
 
             let token = store.issue_jwt(&handle, &role)?;
             let refresh_token = store.issue_refresh_token(&handle, &role).await?;
-            Ok(TokenResponse { token, refresh_token: Some(refresh_token), handle, role })
+            Ok(TokenResponse {
+                token,
+                refresh_token: Some(refresh_token),
+                handle,
+                role,
+            })
         }
     }
 
@@ -262,7 +353,12 @@ impl IdentityV1 for PostgresIdentityStore {
 
             let token = store.issue_jwt(&handle, &role)?;
             let new_refresh = store.issue_refresh_token(&handle, &role).await?;
-            Ok(TokenResponse { token, refresh_token: Some(new_refresh), handle, role })
+            Ok(TokenResponse {
+                token,
+                refresh_token: Some(new_refresh),
+                handle,
+                role,
+            })
         }
     }
 
@@ -317,6 +413,7 @@ impl BearerTokenValidator for PostgresIdentityStore {
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| format!("{}\x1e{}", c.sub, c.role))
+        self.decode_jwt(token)
+            .map(|c| format!("{}\x1e{}", c.sub, c.role))
     }
 }

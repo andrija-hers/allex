@@ -9,6 +9,7 @@ path = "./src/lib.rs"
 
 [dependencies]
 identity = { path = "../identity", package = "allex-identity" }
+message_templates = { path = "../message-templates", package = "allex-message-templates" }
 transport = { path = "../transport", package = "allex-transport" }
 bcrypt = "0.15"
 jsonwebtoken = "9"

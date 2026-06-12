@@ -1,0 +1,24 @@
+[package]
+name = "allex-identity-sqlite"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_identity_sqlite"
+path = "./lib.rs"
+
+[dependencies]
+identity = { path = "../identity", package = "allex-identity" }
+message_templates = { path = "../message-templates", package = "allex-message-templates" }
+transport = { path = "../transport", package = "allex-transport" }
+bcrypt = "0.15"
+jsonwebtoken = "9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

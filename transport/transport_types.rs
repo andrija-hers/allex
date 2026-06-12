@@ -192,3 +192,39 @@ pub enum CallResponse {
     /// Non-terminal progress payload.
     Progress(Payload),
 }
+
+/// Uninhabited success type for streaming RPC methods that never terminate
+/// normally — i.e. "billboard" streams that run until the connection drops.
+///
+/// Use `Never` as the `T` parameter in
+/// `ProgressableFuture<P, Never, E>` / `Stream<AllexStep<P, Never, E>>`
+/// to document and enforce that no success frame is ever emitted.
+///
+/// The `Serialize` and `Deserialize` impls are formally required by the
+/// `#[rpc_module]` macro's wire-protocol bounds, but they are unreachable
+/// in practice because a `Never` value cannot be constructed.
+#[derive(Debug, Clone)]
+pub enum Never {}
+
+impl serde::Serialize for Never {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> core::result::Result<S::Ok, S::Error> {
+        match *self {}
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Never {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        // Formally unreachable — the server never sends a success frame for
+        // a billboard stream.  Return a descriptive error just in case.
+        let _ = d;
+        Err(serde::de::Error::custom(
+            "received unexpected success frame on a Never stream",
+        ))
+    }
+}
+
+impl From<std::convert::Infallible> for Never {
+    fn from(x: std::convert::Infallible) -> Self {
+        match x {}
+    }
+}

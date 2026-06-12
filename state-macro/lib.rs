@@ -43,8 +43,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Data, DeriveInput, Field, Fields, Ident, Meta, Type, parse_macro_input,
-    punctuated::Punctuated, token::Comma,
+    Data, DeriveInput, Field, Fields, Ident, Meta, Type, parse_macro_input, punctuated::Punctuated,
+    token::Comma,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,29 +97,38 @@ struct FieldInfo<'a> {
     kind: Option<FieldKind>, // None = plain (non-state)
 }
 
-fn inspect_fields<'a>(
-    named: &'a Punctuated<Field, Comma>,
-) -> syn::Result<Vec<FieldInfo<'a>>> {
-    named.iter().map(|f| {
-        Ok(FieldInfo { field: f, kind: state_attr_kind(f)? })
-    }).collect()
+fn inspect_fields<'a>(named: &'a Punctuated<Field, Comma>) -> syn::Result<Vec<FieldInfo<'a>>> {
+    named
+        .iter()
+        .map(|f| {
+            Ok(FieldInfo {
+                field: f,
+                kind: state_attr_kind(f)?,
+            })
+        })
+        .collect()
 }
 
-fn extract_state_fields<'a>(
-    infos: &'a [FieldInfo<'a>],
-    use_hidden: bool,
-) -> Vec<StateField<'a>> {
-    infos.iter().filter_map(|fi| {
-        fi.kind.map(|kind| {
-            let ident = fi.field.ident.as_ref().expect("named field");
-            let storage_ident = if use_hidden {
-                format_ident!("__state_{}", ident)
-            } else {
-                ident.clone()
-            };
-            StateField { ident, storage_ident, ty: &fi.field.ty, kind }
+fn extract_state_fields<'a>(infos: &'a [FieldInfo<'a>], use_hidden: bool) -> Vec<StateField<'a>> {
+    infos
+        .iter()
+        .filter_map(|fi| {
+            fi.kind.map(|kind| {
+                let ident = fi.field.ident.as_ref().expect("named field");
+                let storage_ident = if use_hidden {
+                    format_ident!("__state_{}", ident)
+                } else {
+                    ident.clone()
+                };
+                StateField {
+                    ident,
+                    storage_ident,
+                    ty: &fi.field.ty,
+                    kind,
+                }
+            })
         })
-    }).collect()
+        .collect()
 }
 
 fn state_attr_kind(field: &Field) -> syn::Result<Option<FieldKind>> {
@@ -146,14 +155,17 @@ fn state_attr_kind(field: &Field) -> syn::Result<Option<FieldKind>> {
                 return Err(syn::Error::new_spanned(
                     other,
                     "expected `#[state]`, `#[state(nested)]`, or `#[state(vec)]`",
-                ))
+                ));
             }
         }
     }
     Ok(None)
 }
 
-fn get_named_fields<'a>(data: &'a Data, ident: &'a Ident) -> syn::Result<&'a Punctuated<Field, Comma>> {
+fn get_named_fields<'a>(
+    data: &'a Data,
+    ident: &'a Ident,
+) -> syn::Result<&'a Punctuated<Field, Comma>> {
     match data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(f) => Ok(&f.named),
@@ -240,26 +252,31 @@ fn expand_state_type(input: DeriveInput) -> syn::Result<TokenStream2> {
 
 /// Rewrite the struct's field list: rename `#[state]` fields and make them private.
 fn rewrite_struct_fields(infos: &[FieldInfo<'_>]) -> syn::Result<TokenStream2> {
-    let fields: Vec<TokenStream2> = infos.iter().map(|fi| {
-        let field = fi.field;
-        match fi.kind {
-            None => {
-                // Plain field — emit as-is
-                quote! { #field }
+    let fields: Vec<TokenStream2> = infos
+        .iter()
+        .map(|fi| {
+            let field = fi.field;
+            match fi.kind {
+                None => {
+                    // Plain field — emit as-is
+                    quote! { #field }
+                }
+                Some(_) => {
+                    // State field — rename, make private, strip #[state] attr
+                    let ident = field.ident.as_ref().expect("named field");
+                    let storage = format_ident!("__state_{}", ident);
+                    let ty = &field.ty;
+                    let other_attrs: Vec<_> = field
+                        .attrs
+                        .iter()
+                        .filter(|a| !a.path().is_ident("state"))
+                        .collect();
+                    // No visibility modifier = private to the module
+                    quote! { #(#other_attrs)* #storage: #ty }
+                }
             }
-            Some(_) => {
-                // State field — rename, make private, strip #[state] attr
-                let ident = field.ident.as_ref().expect("named field");
-                let storage = format_ident!("__state_{}", ident);
-                let ty = &field.ty;
-                let other_attrs: Vec<_> = field.attrs.iter()
-                    .filter(|a| !a.path().is_ident("state"))
-                    .collect();
-                // No visibility modifier = private to the module
-                quote! { #(#other_attrs)* #storage: #ty }
-            }
-        }
-    }).collect();
+        })
+        .collect();
     Ok(quote! { #(#fields),* })
 }
 
@@ -322,26 +339,29 @@ fn gen_constructor(
 
 /// Generate read-only getters for all state fields.
 fn gen_getters(struct_ident: &Ident, state_fields: &[StateField<'_>]) -> TokenStream2 {
-    let methods: Vec<TokenStream2> = state_fields.iter().map(|f| {
-        let name = f.ident;       // getter name = logical field name
-        let storage = &f.storage_ident;
-        let ty = f.ty;
-        match f.kind {
-            FieldKind::Atomic | FieldKind::Nested => quote! {
-                pub fn #name(&self) -> &#ty {
-                    &self.#storage
-                }
-            },
-            FieldKind::Vec => {
-                let item_ty = vec_item_ty(ty);
-                quote! {
-                    pub fn #name(&self) -> &[#item_ty] {
+    let methods: Vec<TokenStream2> = state_fields
+        .iter()
+        .map(|f| {
+            let name = f.ident; // getter name = logical field name
+            let storage = &f.storage_ident;
+            let ty = f.ty;
+            match f.kind {
+                FieldKind::Atomic | FieldKind::Nested => quote! {
+                    pub fn #name(&self) -> &#ty {
                         &self.#storage
+                    }
+                },
+                FieldKind::Vec => {
+                    let item_ty = vec_item_ty(ty);
+                    quote! {
+                        pub fn #name(&self) -> &[#item_ty] {
+                            &self.#storage
+                        }
                     }
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     quote! {
         impl #struct_ident {
@@ -388,7 +408,8 @@ fn gen_mutators(
     update_ident: &Ident,
     state_fields: &[StateField<'_>],
 ) -> TokenStream2 {
-    let methods: Vec<TokenStream2> = state_fields.iter()
+    let methods: Vec<TokenStream2> = state_fields
+        .iter()
         .map(|f| mutator_methods(f, update_ident))
         .collect();
     quote! {
@@ -417,9 +438,9 @@ fn update_variant(f: &StateField<'_>) -> TokenStream2 {
         FieldKind::Vec => {
             let item_ty = vec_item_ty(ty);
             let item_update_ty = nested_update_ty(item_ty);
-            let pushed  = field_to_variant_pushed(f.ident);
+            let pushed = field_to_variant_pushed(f.ident);
             let removed = field_to_variant_removed(f.ident);
-            let item_v  = field_to_variant_item(f.ident);
+            let item_v = field_to_variant_item(f.ident);
             quote! {
                 #pushed(#item_ty),
                 #removed(usize),
@@ -449,9 +470,9 @@ fn apply_arm(f: &StateField<'_>) -> TokenStream2 {
             }
         }
         FieldKind::Vec => {
-            let pushed  = field_to_variant_pushed(f.ident);
+            let pushed = field_to_variant_pushed(f.ident);
             let removed = field_to_variant_removed(f.ident);
-            let item_v  = field_to_variant_item(f.ident);
+            let item_v = field_to_variant_item(f.ident);
             quote! {
                 #update_path::#pushed(item) => {
                     self.#storage.push(item);
@@ -471,13 +492,13 @@ fn apply_arm(f: &StateField<'_>) -> TokenStream2 {
 
 /// Uses `f.storage_ident` for field access in setter / mutator bodies.
 fn mutator_methods(f: &StateField<'_>, update_enum: &Ident) -> TokenStream2 {
-    let logical = f.ident;   // method name suffix (always logical)
+    let logical = f.ident; // method name suffix (always logical)
     let storage = &f.storage_ident; // actual struct field
     let ty = f.ty;
 
     match f.kind {
         FieldKind::Atomic => {
-            let method  = format_ident!("set_{}", logical);
+            let method = format_ident!("set_{}", logical);
             let variant = field_to_variant_changed(logical);
             quote! {
                 pub fn #method(&mut self, value: #ty) -> ::std::option::Option<#update_enum> {
@@ -490,8 +511,8 @@ fn mutator_methods(f: &StateField<'_>, update_enum: &Ident) -> TokenStream2 {
             }
         }
         FieldKind::Nested => {
-            let method   = format_ident!("mutate_{}", logical);
-            let variant  = field_to_variant_nested(logical);
+            let method = format_ident!("mutate_{}", logical);
+            let variant = field_to_variant_nested(logical);
             let update_ty = nested_update_ty(ty);
             quote! {
                 pub fn #method<F>(&mut self, f: F) -> ::std::option::Option<#update_enum>
@@ -503,14 +524,14 @@ fn mutator_methods(f: &StateField<'_>, update_enum: &Ident) -> TokenStream2 {
             }
         }
         FieldKind::Vec => {
-            let item_ty       = vec_item_ty(ty);
+            let item_ty = vec_item_ty(ty);
             let item_update_ty = nested_update_ty(item_ty);
-            let push_m   = format_ident!("push_{}", logical);
+            let push_m = format_ident!("push_{}", logical);
             let remove_m = format_ident!("remove_{}", logical);
             let mutate_m = format_ident!("mutate_{}", logical);
-            let pushed  = field_to_variant_pushed(logical);
+            let pushed = field_to_variant_pushed(logical);
             let removed = field_to_variant_removed(logical);
-            let item_v  = field_to_variant_item(logical);
+            let item_v = field_to_variant_item(logical);
             quote! {
                 pub fn #push_m(&mut self, item: #item_ty) -> #update_enum {
                     self.#storage.push(item.clone());

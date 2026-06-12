@@ -9,6 +9,10 @@ use identity::{
     RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use message_templates::{
+    ForgotPasswordMessageRequest, ForgotPasswordMessageResponse, RenderMessageTemplateRequest,
+    RenderedMessageResponse, TemplateError, UpsertMessageTemplateRequest, render_stored_template,
+};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,6 +20,8 @@ use transport::BearerTokenValidator;
 
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
 const REFRESH_TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("refresh_tokens");
+const MESSAGE_TEMPLATES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("message_templates");
 
 #[derive(Serialize, Deserialize)]
 struct Claims {
@@ -95,13 +101,87 @@ impl RedbIdentityStore {
             let write_tx = database.begin_write().map_err(redb_err)?;
             {
                 let _ = write_tx.open_table(USERS_TABLE).map_err(redb_err)?;
-                let _ = write_tx.open_table(REFRESH_TOKENS_TABLE).map_err(redb_err)?;
+                let _ = write_tx
+                    .open_table(REFRESH_TOKENS_TABLE)
+                    .map_err(redb_err)?;
             }
             write_tx.commit().map_err(redb_err)?;
             Ok(())
         })
         .await
         .map_err(join_err)?
+    }
+
+    pub async fn upsert_message_template(
+        &self,
+        req: UpsertMessageTemplateRequest,
+    ) -> Result<(), TemplateError> {
+        let database = self.database.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), TemplateError> {
+            let write_tx = database
+                .begin_write()
+                .map_err(template_storage_err)?;
+            {
+                let mut table = write_tx
+                    .open_table(MESSAGE_TEMPLATES_TABLE)
+                    .map_err(template_storage_err)?;
+                table
+                    .insert(
+                        format!("{}:{}", req.template_key, req.channel.as_str()).as_str(),
+                        req.body.as_bytes(),
+                    )
+                    .map_err(template_storage_err)?;
+            }
+            write_tx.commit().map_err(template_storage_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| TemplateError::Storage(e.to_string()))?
+    }
+
+    pub async fn render_message_template(
+        &self,
+        req: RenderMessageTemplateRequest,
+    ) -> Result<RenderedMessageResponse, TemplateError> {
+        let database = self.database.clone();
+        let key = format!("{}:{}", req.template_key, req.channel.as_str());
+        let body = tokio::task::spawn_blocking(move || -> Result<String, TemplateError> {
+            let read_tx = database
+                .begin_read()
+                .map_err(template_storage_err)?;
+            let table = read_tx
+                .open_table(MESSAGE_TEMPLATES_TABLE)
+                .map_err(template_storage_err)?;
+            let value = table
+                .get(key.as_str())
+                .map_err(template_storage_err)?
+                .ok_or(TemplateError::NotFound)?;
+            String::from_utf8(value.value().to_vec())
+                .map_err(template_storage_err)
+        })
+        .await
+        .map_err(|e| TemplateError::Storage(e.to_string()))??;
+        let message = render_stored_template(&body, &req.data)?;
+        Ok(RenderedMessageResponse { message })
+    }
+
+    pub async fn build_forgot_password_message(
+        &self,
+        req: ForgotPasswordMessageRequest,
+    ) -> Result<ForgotPasswordMessageResponse, TemplateError> {
+        let rendered = self
+            .render_message_template(RenderMessageTemplateRequest {
+                template_key: "forgot_password".into(),
+                channel: req.channel,
+                data: serde_json::json!({
+                    "handle": req.handle,
+                    "reset_url": req.reset_url,
+                }),
+            })
+            .await?;
+        Ok(ForgotPasswordMessageResponse {
+            message: rendered.message,
+        })
     }
 
     fn decode_jwt(&self, token: &str) -> Option<Claims> {
@@ -116,7 +196,11 @@ impl RedbIdentityStore {
 
     fn issue_jwt(&self, sub: &str, role: &str) -> Result<String, IdentityError> {
         let exp = now_secs() + self.token_ttl_secs as usize;
-        let claims = Claims { sub: sub.to_string(), role: role.to_string(), exp };
+        let claims = Claims {
+            sub: sub.to_string(),
+            role: role.to_string(),
+            exp,
+        };
         encode(
             &Header::default(),
             &claims,
@@ -138,8 +222,8 @@ impl RedbIdentityStore {
             role: role.to_owned(),
             expires_at: now_secs() as u64 + ttl_secs,
         };
-        let encoded = serde_json::to_vec(&stored)
-            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+        let encoded =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal(e.to_string()))?;
         let write_tx = database
             .begin_write()
             .map_err(|e| IdentityError::Internal(e.to_string()))?;
@@ -202,7 +286,10 @@ impl IdentityV1 for RedbIdentityStore {
                     {
                         return Err(IdentityError::HandleAlreadyTaken);
                     }
-                    let stored = StoredUser { password_hash: hash_for_store, role };
+                    let stored = StoredUser {
+                        password_hash: hash_for_store,
+                        role,
+                    };
                     let encoded = serde_json::to_vec(&stored)
                         .map_err(|e| IdentityError::Internal(e.to_string()))?;
                     table
@@ -218,7 +305,13 @@ impl IdentityV1 for RedbIdentityStore {
             .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
             // Issue JWT
-            let store = RedbIdentityStore { database: db.clone(), secret, token_ttl_secs: token_ttl, refresh_token_ttl_secs: refresh_ttl, revoked_tokens: revoked };
+            let store = RedbIdentityStore {
+                database: db.clone(),
+                secret,
+                token_ttl_secs: token_ttl,
+                refresh_token_ttl_secs: refresh_ttl,
+                revoked_tokens: revoked,
+            };
             let token = store.issue_jwt(&req.handle, &req.role)?;
 
             // Issue refresh token
@@ -284,7 +377,13 @@ impl IdentityV1 for RedbIdentityStore {
             }
 
             let role = stored.role;
-            let store = RedbIdentityStore { database: db.clone(), secret, token_ttl_secs: token_ttl, refresh_token_ttl_secs: refresh_ttl, revoked_tokens: revoked };
+            let store = RedbIdentityStore {
+                database: db.clone(),
+                secret,
+                token_ttl_secs: token_ttl,
+                refresh_token_ttl_secs: refresh_ttl,
+                revoked_tokens: revoked,
+            };
             let token = store.issue_jwt(&req.handle, &role)?;
 
             let h = req.handle.clone();
@@ -318,38 +417,51 @@ impl IdentityV1 for RedbIdentityStore {
             let rt_key = req.refresh_token.clone();
 
             // Atomically consume old refresh token and issue a new one in one blocking task
-            let (handle, role, new_refresh) = tokio::task::spawn_blocking(move || -> Result<(String, String, String), IdentityError> {
-                // Delete old token
-                let write_tx = db
-                    .begin_write()
-                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                let (handle, role) = {
-                    let mut table = write_tx
-                        .open_table(REFRESH_TOKENS_TABLE)
+            let (handle, role, new_refresh) = tokio::task::spawn_blocking(
+                move || -> Result<(String, String, String), IdentityError> {
+                    // Delete old token
+                    let write_tx = db
+                        .begin_write()
                         .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                    let entry = table
-                        .remove(rt_key.as_str())
-                        .map_err(|e| IdentityError::Internal(e.to_string()))?
-                        .ok_or(IdentityError::InvalidRefreshToken)?;
-                    let stored: StoredRefreshToken = serde_json::from_slice(entry.value())
+                    let (handle, role) = {
+                        let mut table = write_tx
+                            .open_table(REFRESH_TOKENS_TABLE)
+                            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                        let entry = table
+                            .remove(rt_key.as_str())
+                            .map_err(|e| IdentityError::Internal(e.to_string()))?
+                            .ok_or(IdentityError::InvalidRefreshToken)?;
+                        let stored: StoredRefreshToken = serde_json::from_slice(entry.value())
+                            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                        if stored.expires_at <= now_secs() as u64 {
+                            return Err(IdentityError::InvalidRefreshToken);
+                        }
+                        (stored.handle, stored.role)
+                    };
+                    write_tx
+                        .commit()
                         .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                    if stored.expires_at <= now_secs() as u64 {
-                        return Err(IdentityError::InvalidRefreshToken);
-                    }
-                    (stored.handle, stored.role)
-                };
-                write_tx
-                    .commit()
-                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
 
-                // Issue new refresh token
-                let new_refresh = RedbIdentityStore::store_refresh_token_sync(&db, &handle, &role, refresh_ttl)?;
-                Ok((handle, role, new_refresh))
-            })
+                    // Issue new refresh token
+                    let new_refresh = RedbIdentityStore::store_refresh_token_sync(
+                        &db,
+                        &handle,
+                        &role,
+                        refresh_ttl,
+                    )?;
+                    Ok((handle, role, new_refresh))
+                },
+            )
             .await
             .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
-            let store = RedbIdentityStore { database: db_for_jwt, secret, token_ttl_secs: token_ttl, refresh_token_ttl_secs: refresh_ttl, revoked_tokens: revoked };
+            let store = RedbIdentityStore {
+                database: db_for_jwt,
+                secret,
+                token_ttl_secs: token_ttl,
+                refresh_token_ttl_secs: refresh_ttl,
+                revoked_tokens: revoked,
+            };
             let token = store.issue_jwt(&handle, &role)?;
 
             Ok(TokenResponse {
@@ -427,7 +539,8 @@ impl BearerTokenValidator for RedbIdentityStore {
         if is_revoked {
             return None;
         }
-        self.decode_jwt(token).map(|c| format!("{}\x1e{}", c.sub, c.role))
+        self.decode_jwt(token)
+            .map(|c| format!("{}\x1e{}", c.sub, c.role))
     }
 }
 
@@ -437,4 +550,8 @@ fn redb_err(e: impl std::fmt::Display) -> RedbIdentityStoreError {
 
 fn join_err(e: tokio::task::JoinError) -> RedbIdentityStoreError {
     RedbIdentityStoreError::Redb(format!("task join error: {e}"))
+}
+
+fn template_storage_err(e: impl std::fmt::Display) -> TemplateError {
+    TemplateError::Storage(e.to_string())
 }

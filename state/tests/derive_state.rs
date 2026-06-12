@@ -16,7 +16,11 @@ struct Leaf {
 
 #[test]
 fn atomic_set_suppression() {
-    let mut leaf = Leaf { value: 5, label: "hi".into(), ignored: false };
+    let mut leaf = Leaf {
+        value: 5,
+        label: "hi".into(),
+        ignored: false,
+    };
     assert!(leaf.set_value(5).is_none(), "same value must be suppressed");
     assert!(leaf.set_value(6).is_some(), "new value must produce update");
     assert_eq!(leaf.value, 6);
@@ -24,9 +28,17 @@ fn atomic_set_suppression() {
 
 #[test]
 fn atomic_apply_roundtrip() {
-    let mut leaf = Leaf { value: 0, label: "x".into(), ignored: false };
+    let mut leaf = Leaf {
+        value: 0,
+        label: "x".into(),
+        ignored: false,
+    };
     let update = leaf.set_value(42).unwrap();
-    let mut target = Leaf { value: 0, label: "x".into(), ignored: false };
+    let mut target = Leaf {
+        value: 0,
+        label: "x".into(),
+        ignored: false,
+    };
     target.apply_update(update);
     assert_eq!(target.value, 42);
 }
@@ -44,7 +56,11 @@ struct Parent {
 #[test]
 fn nested_mutation_propagates() {
     let mut parent = Parent {
-        child: Leaf { value: 0, label: "a".into(), ignored: false },
+        child: Leaf {
+            value: 0,
+            label: "a".into(),
+            ignored: false,
+        },
         name: "root".into(),
     };
     let update = parent.mutate_child(|c| c.set_value(7));
@@ -55,7 +71,11 @@ fn nested_mutation_propagates() {
 #[test]
 fn nested_no_op_suppressed() {
     let mut parent = Parent {
-        child: Leaf { value: 3, label: "b".into(), ignored: false },
+        child: Leaf {
+            value: 3,
+            label: "b".into(),
+            ignored: false,
+        },
         name: "root".into(),
     };
     let update = parent.mutate_child(|c| c.set_value(3));
@@ -74,10 +94,20 @@ struct Container {
 
 #[test]
 fn vec_push() {
-    let mut c = Container { items: vec![], count: 0 };
-    let upd = c.push_items(Leaf { value: 1, label: "one".into(), ignored: false });
+    let mut c = Container {
+        items: vec![],
+        count: 0,
+    };
+    let upd = c.push_items(Leaf {
+        value: 1,
+        label: "one".into(),
+        ignored: false,
+    });
     assert_eq!(c.items.len(), 1);
-    let mut target = Container { items: vec![], count: 0 };
+    let mut target = Container {
+        items: vec![],
+        count: 0,
+    };
     target.apply_update(upd);
     assert_eq!(target.items.len(), 1);
 }
@@ -86,8 +116,16 @@ fn vec_push() {
 fn vec_remove() {
     let mut c = Container {
         items: vec![
-            Leaf { value: 1, label: "a".into(), ignored: false },
-            Leaf { value: 2, label: "b".into(), ignored: false },
+            Leaf {
+                value: 1,
+                label: "a".into(),
+                ignored: false,
+            },
+            Leaf {
+                value: 2,
+                label: "b".into(),
+                ignored: false,
+            },
         ],
         count: 2,
     };
@@ -99,14 +137,21 @@ fn vec_remove() {
 
 #[test]
 fn vec_remove_oob_returns_none() {
-    let mut c = Container { items: vec![], count: 0 };
+    let mut c = Container {
+        items: vec![],
+        count: 0,
+    };
     assert!(c.remove_items(99).is_none());
 }
 
 #[test]
 fn vec_mutate_item() {
     let mut c = Container {
-        items: vec![Leaf { value: 0, label: "x".into(), ignored: false }],
+        items: vec![Leaf {
+            value: 0,
+            label: "x".into(),
+            ignored: false,
+        }],
         count: 1,
     };
     let upd = c.mutate_items(0, |item| item.set_value(55));
@@ -118,24 +163,38 @@ fn vec_mutate_item() {
 
 #[tokio::test]
 async fn local_state_broadcasts_on_change() {
-    let state = LocalState::new(Leaf { value: 0, label: "z".into(), ignored: false });
+    let state = LocalState::new(Leaf {
+        value: 0,
+        label: "z".into(),
+        ignored: false,
+    });
     let mut stream = Box::pin(state.subscribe());
     let _ = stream.next().await;
 
-    let upd = { let mut l = state.current(); l.set_value(10) };
+    let upd = {
+        let mut l = state.current();
+        l.set_value(10)
+    };
     state.apply(upd);
 
-    let next = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        stream.next(),
-    ).await.expect("timeout").expect("stream closed");
+    let next = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream closed");
     assert_eq!(next.value, 10);
 }
 
 #[tokio::test]
 async fn local_state_no_broadcast_on_suppression() {
-    let state = LocalState::new(Leaf { value: 5, label: "z".into(), ignored: false });
-    let upd = { let mut l = state.current(); l.set_value(5) };
+    let state = LocalState::new(Leaf {
+        value: 5,
+        label: "z".into(),
+        ignored: false,
+    });
+    let upd = {
+        let mut l = state.current();
+        l.set_value(5)
+    };
     state.apply(upd);
     assert!(!state.has_subscribers());
 }
@@ -151,7 +210,7 @@ struct HLeaf {
     value: i32,
     #[state]
     label: String,
-    ignored: bool,   // plain — required in new()
+    ignored: bool, // plain — required in new()
 }
 
 // Nested type used by HParent — must implement Default
@@ -172,13 +231,13 @@ impl Default for HNested {
 #[state_type]
 #[derive(Clone, Debug, PartialEq)]
 struct HParent {
-    id: u32,              // plain — required in new()
+    id: u32, // plain — required in new()
     #[state]
-    name: String,         // atomic — required in new()
+    name: String, // atomic — required in new()
     #[state(nested)]
-    nested: HNested,      // nested — NOT a param, uses Default
+    nested: HNested, // nested — NOT a param, uses Default
     #[state(vec)]
-    items: Vec<HLeaf>,    // vec — NOT a param, starts empty
+    items: Vec<HLeaf>, // vec — NOT a param, starts empty
 }
 
 // ---------------------------------------------------------------------------
@@ -289,20 +348,26 @@ async fn state_type_local_state_broadcasts() {
     let mut stream = Box::pin(state.subscribe());
     let _ = stream.next().await;
 
-    let upd = { let mut l = state.current(); l.set_value(42) };
+    let upd = {
+        let mut l = state.current();
+        l.set_value(42)
+    };
     state.apply(upd);
 
-    let next = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        stream.next(),
-    ).await.expect("timeout").expect("stream closed");
+    let next = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream closed");
     assert_eq!(*next.value(), 42);
 }
 
 #[tokio::test]
 async fn state_type_local_state_suppresses_no_change() {
     let state = LocalState::new(HLeaf::new(5, "z".into(), false));
-    let upd = { let mut l = state.current(); l.set_value(5) };
+    let upd = {
+        let mut l = state.current();
+        l.set_value(5)
+    };
     state.apply(upd);
     assert!(!state.has_subscribers());
 }

@@ -127,6 +127,7 @@ enum DartType {
     Double,
     Bool,
     DartString,
+    Never,
     Nullable(Box<DartType>),
     List(Box<DartType>),
     Map(Box<DartType>, Box<DartType>),
@@ -145,6 +146,7 @@ impl DartType {
             DartType::List(elem) => format!("List<{}>", elem.type_str()),
             DartType::Map(k, v) => format!("Map<{}, {}>", k.type_str(), v.type_str()),
             DartType::Custom(name) => name.clone(),
+            DartType::Never => "Never".into(),
             DartType::Unknown(name) => format!("dynamic /* {name} */"),
         }
     }
@@ -175,6 +177,7 @@ impl DartType {
                 format!("({src} as Map<String, dynamic>).map((_k, _v) => MapEntry(_k, {val_dec}))")
             }
             DartType::Custom(name) => format!("{name}.fromJson({src})"),
+            DartType::Never => "throw UnimplementedError('unreachable: Never')".to_string(),
             DartType::Unknown(_) => src.to_string(),
         }
     }
@@ -211,6 +214,7 @@ impl DartType {
                     format!("{val}.map((_k, _v) => MapEntry(_k, {v_enc}))")
                 }
             }
+            DartType::Never => "throw UnimplementedError('unreachable: Never')".to_string(),
             DartType::Custom(_) => format!("{val}.toJson()"),
             DartType::Unknown(_) => val.to_string(),
         }
@@ -716,6 +720,7 @@ fn collect_custom_type_names(ty: &Type, out: &mut Vec<String>) {
                         }
                     }
                 }
+                "Infallible" | "Never" => {}
                 _ => {
                     if !out.contains(&ident) {
                         out.push(ident);
@@ -1342,6 +1347,7 @@ fn rust_type_to_dart(ty: &Type) -> DartType {
                 "f32" | "f64" => DartType::Double,
                 "bool" => DartType::Bool,
                 "String" | "str" => DartType::DartString,
+                "Infallible" | "Never" => DartType::Never,
                 "Option" => {
                     if let PathArguments::AngleBracketed(args) = &seg.arguments {
                         if let Some(GenericArgument::Type(inner)) = args.args.first() {
