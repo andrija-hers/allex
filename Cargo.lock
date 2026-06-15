@@ -64,6 +64,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-mailgunner"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+]
+
+[[package]]
 name = "allex-message-templates"
 version = "0.1.0"
 dependencies = [

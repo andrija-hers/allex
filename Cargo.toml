@@ -6,6 +6,7 @@ members = [
     "progressable-future",
     "execution",
     "message-templates",
+    "mailgunner",
     "identity",
     "postgres-macros",
     "postgres",
