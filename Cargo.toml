@@ -20,4 +20,5 @@ members = [
     "state-macro",
     "dart-codegen",
     "scheduler",
+    "serve",
 ]

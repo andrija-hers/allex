@@ -1,5 +1,29 @@
 use async_trait::async_trait;
-use transport::{Payload, Result};
+use transport::{CallResponse, Payload, Result};
+
+/// A boxed stream of transport-level call responses produced by a streaming
+/// (server-push) RPC method. Same concrete type the `#[rpc_module]` macro emits.
+pub type ResponseStream = std::pin::Pin<Box<dyn futures::Stream<Item = CallResponse> + Send>>;
+
+/// Dispatches streaming RPC methods within a single module.
+///
+/// The generated `<Trait>MethodResponder` implements this alongside
+/// [`MethodExecutor`], so streaming gets a trait object just like unary does and
+/// can be routed generically (see the `allex-serve` crate). Returns `None` when
+/// `method` is not a streaming method on this module — the caller should then
+/// fall back to unary dispatch.
+pub trait StreamingMethodExecutor: Send + Sync {
+    /// Returns the wire-visible module name handled by this executor.
+    fn get_name(&self) -> &str;
+
+    /// Begins a streaming method, or returns `None` if `method` is not streaming.
+    fn execute_streaming(
+        &self,
+        method: &str,
+        payload: Payload,
+        caller_role: Option<&str>,
+    ) -> Option<ResponseStream>;
+}
 
 /// Executes methods within a single module after transport decoding is complete.
 #[async_trait]

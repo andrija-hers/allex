@@ -12,6 +12,9 @@ impl NonNegativeWrappingAtomicI64 {
         }
     }
 
+    // Retained as the natural read accessor for this atomic wrapper, even though
+    // current callers only use `fetch_inc_wrap`.
+    #[allow(dead_code)]
     pub fn load(&self, ordering: Ordering) -> i64 {
         self.inner.load(ordering)
     }

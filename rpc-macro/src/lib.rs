@@ -159,6 +159,27 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
             }
         }
 
+        // Trait object form of the inherent `execute_streaming`, so the registry
+        // can route streaming generically (see `allex-serve`).
+        impl<I, C> ::execution::StreamingMethodExecutor for #responder_ident<I, C>
+        where
+            I: #trait_ident + Send + Sync,
+            C: ::transport::UnaryCodec + Send + Sync + 'static,
+        {
+            fn get_name(&self) -> &str {
+                #module_name
+            }
+
+            fn execute_streaming(
+                &self,
+                method: &str,
+                payload: ::transport::Payload,
+                caller_role: ::std::option::Option<&str>,
+            ) -> ::std::option::Option<::execution::ResponseStream> {
+                #responder_ident::<I, C>::execute_streaming(self, method, payload, caller_role)
+            }
+        }
+
         #[::async_trait::async_trait]
         impl<I, C> ::execution::MethodResponder for #responder_ident<I, C>
         where

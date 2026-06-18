@@ -56,6 +56,9 @@ enum SignalROutgoing {
         result: Option<serde_json::Value>,
         error: Option<String>,
     },
+    // Part of the SignalR protocol model; this placeholder transport never emits
+    // it yet, but the encoder handles it.
+    #[allow(dead_code)]
     Pong,
 }
 

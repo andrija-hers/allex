@@ -9,4 +9,5 @@ path = "./lib.rs"
 [dependencies]
 async-trait = "0.1.89"
 dashmap = "6.2.1"
+futures = "0.3"
 transport = { version = "0.1.0", path = "../transport", package = "allex-transport" }

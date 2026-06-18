@@ -1,0 +1,14 @@
+[package]
+name = "allex-serve"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_serve"
+path = "./lib.rs"
+
+[dependencies]
+execution = { version = "0.1.0", path = "../execution", package = "allex-execution" }
+transport = { version = "0.1.0", path = "../transport", package = "allex-transport" }
+futures = "0.3"
+tokio = { version = "1", features = ["rt"] }

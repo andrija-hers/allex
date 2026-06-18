@@ -25,6 +25,7 @@ dependencies = [
  "allex-transport",
  "async-trait",
  "dashmap",
+ "futures",
 ]
 
 [[package]]
@@ -129,6 +130,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "allex-serve"
+version = "0.1.0"
+dependencies = [
+ "allex-execution",
+ "allex-transport",
+ "futures",
+ "tokio",
 ]
 
 [[package]]

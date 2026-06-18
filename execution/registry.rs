@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use crate::{MethodExecutor, ModuleExecutor, RelayedModuleExecutor};
+use crate::{
+    MethodExecutor, ModuleExecutor, RelayedModuleExecutor, ResponseStream, StreamingMethodExecutor,
+};
 use transport::tracing::{debug, debug_span, warn};
 use transport::{Error, Payload, Result};
 
@@ -10,6 +12,7 @@ use transport::{Error, Payload, Result};
 pub struct Registry {
     servers: DashMap<String, Arc<dyn ModuleExecutor>>,
     modules: DashMap<String, Arc<dyn MethodExecutor>>,
+    streaming: DashMap<String, Arc<dyn StreamingMethodExecutor>>,
 }
 
 impl Registry {
@@ -18,6 +21,7 @@ impl Registry {
         Self {
             servers: DashMap::new(),
             modules: DashMap::new(),
+            streaming: DashMap::new(),
         }
     }
 
@@ -26,9 +30,42 @@ impl Registry {
         self.servers.insert(name.to_string(), executor);
     }
 
-    /// Registers a local module executor keyed by its reported module name.
+    /// Registers a local module executor (unary methods) keyed by module name.
     pub fn register_module(&self, module: Arc<dyn MethodExecutor>) {
         self.modules.insert(module.get_name().to_string(), module);
+    }
+
+    /// Registers a module's streaming methods keyed by module name.
+    pub fn register_streaming_module(&self, module: Arc<dyn StreamingMethodExecutor>) {
+        self.streaming
+            .insert(module.get_name().to_string(), module);
+    }
+
+    /// Registers a generated responder for BOTH unary and streaming dispatch in
+    /// one call. Generated `<Trait>MethodResponder`s implement both traits, so
+    /// this is the usual registration entry point.
+    pub fn register<M>(&self, module: Arc<M>)
+    where
+        M: MethodExecutor + StreamingMethodExecutor + 'static,
+    {
+        self.modules
+            .insert(MethodExecutor::get_name(&*module).to_string(), module.clone());
+        self.streaming
+            .insert(StreamingMethodExecutor::get_name(&*module).to_string(), module);
+    }
+
+    /// Begins a streaming method on a registered module, or returns `None` if the
+    /// module/method isn't a streaming endpoint (the caller should try unary).
+    pub fn execute_streaming(
+        &self,
+        module: &str,
+        method: &str,
+        payload: Payload,
+        caller_role: Option<&str>,
+    ) -> Option<ResponseStream> {
+        self.streaming
+            .get(module)
+            .and_then(|m| m.execute_streaming(method, payload, caller_role))
     }
 }
 
