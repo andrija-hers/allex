@@ -1,0 +1,16 @@
+[package]
+name = "allex-keyed-events"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_keyed_events"
+path = "./lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+tokio-postgres = "0.7"
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time", "macros", "rt-multi-thread"] }

@@ -21,4 +21,5 @@ members = [
     "dart-codegen",
     "scheduler",
     "serve",
+    "keyed-events",
 ]
