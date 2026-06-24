@@ -65,6 +65,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-keyed-events"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "allex-mailgunner"
 version = "0.1.0"
 dependencies = [

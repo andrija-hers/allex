@@ -85,8 +85,23 @@ impl PostgresIdentityStore {
                             token      TEXT        PRIMARY KEY,
                             handle     TEXT        NOT NULL REFERENCES users(handle) ON DELETE CASCADE,
                             role       TEXT        NOT NULL,
-                            expires_at TIMESTAMPTZ NOT NULL
+                            expires_at TIMESTAMPTZ NOT NULL,
+                            -- Rotation grace: when a token is consumed it is marked
+                            -- `rotated_at` and points at its `replaced_by` successor,
+                            -- so a near-simultaneous second use (multi-tab / retry)
+                            -- gets the successor instead of being logged out.
+                            rotated_at  TIMESTAMPTZ,
+                            replaced_by TEXT
                         )",
+                        &[],
+                    )
+                    .await?;
+                // Migrate pre-existing deployments (additive, safe).
+                client
+                    .execute(
+                        "ALTER TABLE refresh_tokens \
+                         ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ, \
+                         ADD COLUMN IF NOT EXISTS replaced_by TEXT",
                         &[],
                     )
                     .await?;
@@ -265,6 +280,11 @@ impl IdentityV1 for PostgresIdentityStore {
             let handle: String = rows[0].try_get("handle").map_err(db_err)?;
             let role: String = rows[0].try_get("role").map_err(db_err)?;
 
+            // Release this connection before issue_refresh_token acquires its own,
+            // or concurrent registrations deadlock the pool (see login).
+            drop(rows);
+            drop(client);
+
             let token = store.issue_jwt(&handle, &role)?;
             let refresh_token = store.issue_refresh_token(&handle, &role).await?;
             Ok(TokenResponse {
@@ -297,6 +317,12 @@ impl IdentityV1 for PostgresIdentityStore {
             let password_hash: String = row.try_get("password_hash").map_err(db_err)?;
             let role: String = row.try_get("role").map_err(db_err)?;
 
+            // Release the pooled connection before bcrypt + issue_refresh_token
+            // (which acquires its own). Holding this one across the second
+            // acquisition deadlocks the pool under concurrent logins.
+            drop(row);
+            drop(client);
+
             let password = req.password.clone();
             let valid = tokio::task::spawn_blocking(move || {
                 verify(password, &password_hash).map_err(|e| IdentityError::Internal(e.to_string()))
@@ -328,37 +354,95 @@ impl IdentityV1 for PostgresIdentityStore {
         async move {
             let client = db.get_client().await.map_err(db_err)?;
 
-            // Atomically consume the refresh token (DELETE + return data)
-            let row = client
+            // Single-use rotation WITH a grace window. Atomically claim the token
+            // only if it hasn't been rotated yet and isn't expired: mark it
+            // `rotated_at` so a concurrent claim can't also win.
+            let claimed = client
                 .query_opt(
-                    "DELETE FROM refresh_tokens
-                     WHERE token = $1 AND expires_at > now()
+                    "UPDATE refresh_tokens SET rotated_at = now()
+                     WHERE token = $1 AND rotated_at IS NULL AND expires_at > now()
                      RETURNING handle, role",
                     &[&req.refresh_token],
                 )
                 .await
-                .map_err(db_err)?
-                .ok_or(IdentityError::InvalidRefreshToken)?;
+                .map_err(db_err)?;
 
-            let handle: String = row.try_get("handle").map_err(db_err)?;
-            let role: String = row.try_get("role").map_err(db_err)?;
+            if let Some(row) = claimed {
+                // First (winning) use: mint a fresh pair and link the old token to
+                // its successor so a within-grace re-presentation can follow it.
+                let handle: String = row.try_get("handle").map_err(db_err)?;
+                let role: String = row.try_get("role").map_err(db_err)?;
+                let token = store.issue_jwt(&handle, &role)?;
+                // Mint the new refresh token on THIS connection (which we still
+                // need below) rather than via issue_refresh_token, which would
+                // acquire a second pooled connection and risk a deadlock under
+                // concurrent refreshes (see login).
+                let new_refresh = uuid::Uuid::new_v4().to_string();
+                let ttl = store.refresh_token_ttl_secs.to_string();
+                client
+                    .execute(
+                        "INSERT INTO refresh_tokens (token, handle, role, expires_at)
+                         VALUES ($1, $2, $3, now() + ($4 || ' seconds')::interval)",
+                        &[&new_refresh, &handle, &role, &ttl],
+                    )
+                    .await
+                    .map_err(db_err)?;
+                let _ = client
+                    .execute(
+                        "UPDATE refresh_tokens SET replaced_by = $2 WHERE token = $1",
+                        &[&req.refresh_token, &new_refresh],
+                    )
+                    .await;
+                // Tidy up: drop expired tokens and fully-rotated ones past grace.
+                let _ = client
+                    .execute(
+                        "DELETE FROM refresh_tokens
+                         WHERE handle = $1
+                           AND (expires_at <= now()
+                                OR rotated_at < now() - interval '1 hour')",
+                        &[&handle],
+                    )
+                    .await;
+                return Ok(TokenResponse {
+                    token,
+                    refresh_token: Some(new_refresh),
+                    handle,
+                    role,
+                });
+            }
 
-            // Opportunistically clean up any remaining expired tokens for this user
-            let _ = client
-                .execute(
-                    "DELETE FROM refresh_tokens WHERE handle = $1 AND expires_at <= now()",
-                    &[&handle],
+            // Not claimable: either already rotated, expired, or unknown. If it was
+            // rotated within the grace window and has a still-valid successor, hand
+            // that successor back (so a racing tab stays signed in instead of being
+            // bounced). Otherwise the token is invalid.
+            let grace = client
+                .query_opt(
+                    "SELECT t.handle, t.role, t.replaced_by
+                     FROM refresh_tokens t
+                     JOIN refresh_tokens s ON s.token = t.replaced_by
+                     WHERE t.token = $1
+                       AND t.replaced_by IS NOT NULL
+                       AND t.rotated_at > now() - interval '30 seconds'
+                       AND s.expires_at > now()",
+                    &[&req.refresh_token],
                 )
-                .await;
+                .await
+                .map_err(db_err)?;
 
-            let token = store.issue_jwt(&handle, &role)?;
-            let new_refresh = store.issue_refresh_token(&handle, &role).await?;
-            Ok(TokenResponse {
-                token,
-                refresh_token: Some(new_refresh),
-                handle,
-                role,
-            })
+            if let Some(row) = grace {
+                let handle: String = row.try_get("handle").map_err(db_err)?;
+                let role: String = row.try_get("role").map_err(db_err)?;
+                let successor: String = row.try_get("replaced_by").map_err(db_err)?;
+                let token = store.issue_jwt(&handle, &role)?;
+                return Ok(TokenResponse {
+                    token,
+                    refresh_token: Some(successor),
+                    handle,
+                    role,
+                });
+            }
+
+            Err(IdentityError::InvalidRefreshToken)
         }
     }
 

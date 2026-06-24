@@ -167,25 +167,31 @@ async fn refresh_returns_new_token_pair() {
 }
 
 #[tokio::test]
-async fn refresh_token_cannot_be_reused() {
+async fn refresh_token_reuse_within_grace_returns_successor() {
+    // Single-use rotation WITH a grace window: the first use rotates the token
+    // and mints a successor; re-presenting the consumed token within the grace
+    // window returns that SAME successor (so a racing tab / retry stays signed
+    // in) rather than minting a new, divergent chain or erroring out.
     let (store, _c) = start_store().await;
     let login_resp = store.register(reg("eve_r2", "pass")).await.unwrap();
     let refresh_token = login_resp.refresh_token.unwrap();
 
-    store
+    let first = store
         .refresh(RefreshRequest {
             refresh_token: refresh_token.clone(),
         })
         .await
         .unwrap();
+    let successor = first.refresh_token.expect("first refresh mints a successor");
 
-    let err = store
+    let second = store
         .refresh(RefreshRequest { refresh_token })
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, IdentityError::InvalidRefreshToken),
-        "expected InvalidRefreshToken, got {err:?}"
+        .expect("reuse within grace returns the successor, not an error");
+    assert_eq!(
+        second.refresh_token.as_deref(),
+        Some(successor.as_str()),
+        "within-grace reuse must hand back the same successor token"
     );
 }
 
