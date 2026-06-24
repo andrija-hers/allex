@@ -196,6 +196,37 @@ async fn refresh_token_reuse_within_grace_returns_successor() {
 }
 
 #[tokio::test]
+async fn concurrent_refresh_of_same_token_converges_on_one_successor() {
+    // Two tabs firing the same refresh at once: exactly one wins the atomic
+    // claim and mints the successor; the other falls to the grace path and must
+    // get that SAME successor back (never InvalidRefreshToken, never a second,
+    // divergent chain). This is the race the single-statement rotation closes.
+    let (store, _c) = start_store().await;
+    let login_resp = store.register(reg("eve_r3", "pass")).await.unwrap();
+    let refresh_token = login_resp.refresh_token.unwrap();
+
+    let (a, b) = tokio::join!(
+        store.refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        }),
+        store.refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        }),
+    );
+    let a = a.expect("one concurrent refresh wins the claim");
+    let b = b.expect("the other concurrent refresh follows grace, not an error");
+    assert_eq!(
+        a.refresh_token, b.refresh_token,
+        "both concurrent refreshes must converge on the same successor token"
+    );
+    assert_ne!(
+        a.refresh_token.as_deref(),
+        Some(refresh_token.as_str()),
+        "the successor must differ from the consumed token"
+    );
+}
+
+#[tokio::test]
 async fn refresh_invalid_token_returns_error() {
     let (store, _c) = start_store().await;
     let err = store

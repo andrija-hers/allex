@@ -105,6 +105,15 @@ impl PostgresIdentityStore {
                         &[],
                     )
                     .await?;
+                // Index the handle: refresh() runs a per-call cleanup DELETE
+                // scoped by handle, and logout/password-change delete by handle.
+                client
+                    .execute(
+                        "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_handle \
+                         ON refresh_tokens (handle)",
+                        &[],
+                    )
+                    .await?;
                 client
                     .execute(
                         "CREATE TABLE IF NOT EXISTS message_templates (
@@ -354,45 +363,37 @@ impl IdentityV1 for PostgresIdentityStore {
         async move {
             let client = db.get_client().await.map_err(db_err)?;
 
-            // Single-use rotation WITH a grace window. Atomically claim the token
-            // only if it hasn't been rotated yet and isn't expired: mark it
-            // `rotated_at` so a concurrent claim can't also win.
+            // Single-use rotation WITH a grace window, performed atomically in a
+            // single statement so a racing second use can never observe a
+            // half-rotated token (rotated but not yet linked to its successor):
+            // claim the token (only if not yet rotated and unexpired), point it
+            // at a freshly-minted successor, and insert that successor — all of
+            // which become visible together the instant this statement commits.
+            let new_refresh = uuid::Uuid::new_v4().to_string();
+            let ttl = store.refresh_token_ttl_secs.to_string();
             let claimed = client
                 .query_opt(
-                    "UPDATE refresh_tokens SET rotated_at = now()
-                     WHERE token = $1 AND rotated_at IS NULL AND expires_at > now()
+                    "WITH claimed AS (
+                         UPDATE refresh_tokens
+                            SET rotated_at = now(), replaced_by = $2
+                          WHERE token = $1 AND rotated_at IS NULL AND expires_at > now()
+                      RETURNING handle, role
+                     )
+                     INSERT INTO refresh_tokens (token, handle, role, expires_at)
+                     SELECT $2, handle, role, now() + ($3 || ' seconds')::interval
+                       FROM claimed
                      RETURNING handle, role",
-                    &[&req.refresh_token],
+                    &[&req.refresh_token, &new_refresh, &ttl],
                 )
                 .await
                 .map_err(db_err)?;
 
             if let Some(row) = claimed {
-                // First (winning) use: mint a fresh pair and link the old token to
-                // its successor so a within-grace re-presentation can follow it.
+                // First (winning) use: a fresh successor was just inserted and the
+                // old token now points at it.
                 let handle: String = row.try_get("handle").map_err(db_err)?;
                 let role: String = row.try_get("role").map_err(db_err)?;
                 let token = store.issue_jwt(&handle, &role)?;
-                // Mint the new refresh token on THIS connection (which we still
-                // need below) rather than via issue_refresh_token, which would
-                // acquire a second pooled connection and risk a deadlock under
-                // concurrent refreshes (see login).
-                let new_refresh = uuid::Uuid::new_v4().to_string();
-                let ttl = store.refresh_token_ttl_secs.to_string();
-                client
-                    .execute(
-                        "INSERT INTO refresh_tokens (token, handle, role, expires_at)
-                         VALUES ($1, $2, $3, now() + ($4 || ' seconds')::interval)",
-                        &[&new_refresh, &handle, &role, &ttl],
-                    )
-                    .await
-                    .map_err(db_err)?;
-                let _ = client
-                    .execute(
-                        "UPDATE refresh_tokens SET replaced_by = $2 WHERE token = $1",
-                        &[&req.refresh_token, &new_refresh],
-                    )
-                    .await;
                 // Tidy up: drop expired tokens and fully-rotated ones past grace.
                 let _ = client
                     .execute(
