@@ -5,7 +5,7 @@ use std::{
 };
 
 use allex_dart_codegen::{
-    find_reachable_dtos, find_rpc_modules, referenced_type_names, render_dart_client,
+    find_reachable_dtos, find_rpc_modules, referenced_type_names, render_dart_client_importing,
     render_dart_dtos,
 };
 
@@ -39,17 +39,31 @@ fn run(args: Vec<String>) -> Result<(), String> {
     fs::create_dir_all(&out_dir)
         .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
 
-    for module in modules {
-        let roots = referenced_type_names(&module);
-        let root_refs = roots.iter().map(String::as_str).collect::<Vec<_>>();
-        let dtos = find_reachable_dtos(&source, &root_refs);
-        let client_path = out_dir.join(format!("{}_client.dart", module.module_name));
-        let dto_path = out_dir.join(format!("{}_dtos.dart", module.module_name));
+    // All modules generated in one run share a single `dtos.dart`. DTOs referenced by more
+    // than one module would otherwise be emitted into each module's file, so an app importing
+    // two clients would hit duplicate-definition clashes. Collect the union of reachable DTOs
+    // once and have every client import the shared file.
+    let mut roots: Vec<String> = Vec::new();
+    for module in &modules {
+        roots.extend(referenced_type_names(module));
+    }
+    roots.sort();
+    roots.dedup();
+    let root_refs = roots.iter().map(String::as_str).collect::<Vec<_>>();
+    let dtos = find_reachable_dtos(&source, &root_refs);
 
-        fs::write(&client_path, render_dart_client(&module))
-            .map_err(|err| format!("failed to write {}: {err}", client_path.display()))?;
-        fs::write(&dto_path, render_dart_dtos(&module.module_name, &dtos, &[]))
-            .map_err(|err| format!("failed to write {}: {err}", dto_path.display()))?;
+    const SHARED_DTOS: &str = "dtos.dart";
+    let dto_path = out_dir.join(SHARED_DTOS);
+    fs::write(&dto_path, render_dart_dtos("shared", &dtos, &[]))
+        .map_err(|err| format!("failed to write {}: {err}", dto_path.display()))?;
+
+    for module in &modules {
+        let client_path = out_dir.join(format!("{}_client.dart", module.module_name));
+        fs::write(
+            &client_path,
+            render_dart_client_importing(module, SHARED_DTOS),
+        )
+        .map_err(|err| format!("failed to write {}: {err}", client_path.display()))?;
     }
 
     Ok(())

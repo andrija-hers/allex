@@ -391,10 +391,16 @@ pub fn find_reachable_dtos(source: &str, roots: &[&str]) -> Vec<DtoInfo> {
 }
 
 /// Render a Dart client class for the given module.
-/// Always imports `{module_name}_dtos.dart` from the same directory.
+/// Imports `{module_name}_dtos.dart` from the same directory.
 pub fn render_dart_client(module: &RpcModuleInfo) -> String {
+    render_dart_client_importing(module, &format!("{}_dtos.dart", module.module_name))
+}
+
+/// Render a Dart client class importing its DTOs from `dtos_import` (a file basename in the
+/// same directory). Pass a shared file (e.g. `dtos.dart`) when several modules share DTO types,
+/// so an application can import multiple generated clients without duplicate-definition clashes.
+pub fn render_dart_client_importing(module: &RpcModuleInfo, dtos_import: &str) -> String {
     let class_name = format!("{}Client", module.trait_name);
-    let dtos_import = format!("{}_dtos.dart", module.module_name);
     let mut lines: Vec<String> = vec![
         GENERATED_BANNER.into(),
         format!("// Source trait: {}", module.trait_name),
@@ -1733,6 +1739,50 @@ mod tests {
         assert!(dart.contains(GENERATED_BANNER));
         assert!(dart.contains("import 'arithmetic_v_1_dtos.dart';"));
         assert!(!dart.contains("extra_imports"));
+    }
+
+    #[test]
+    fn client_can_import_a_shared_dtos_file() {
+        let modules = find_rpc_modules(ARITHMETIC_TRAIT);
+        let dart = render_dart_client_importing(&modules[0], "dtos.dart");
+        assert!(dart.contains("import 'dtos.dart';"));
+        assert!(!dart.contains("arithmetic_v_1_dtos.dart"));
+    }
+
+    // Two modules that share a DTO must yield that DTO exactly once in the union — the basis for
+    // the single shared `dtos.dart` the codegen driver emits (no duplicate-definition clashes).
+    const SHARED_DTO_SRC: &str = r#"
+        use rpc_macro::rpc_module;
+        #[derive(Serialize, Deserialize)] pub struct Shared { pub x: i32 }
+        #[derive(Serialize, Deserialize)] pub struct AReq { pub a: i32 }
+        #[derive(Serialize, Deserialize)] pub struct BReq { pub b: i32 }
+        #[derive(Serialize, Deserialize)] pub enum Failure { Nope }
+        #[rpc_module] pub trait AV1 { fn one(&self, req: AReq) -> Result<Shared, Failure>; }
+        #[rpc_module] pub trait BV1 { fn two(&self, req: BReq) -> Result<Shared, Failure>; }
+    "#;
+
+    #[test]
+    fn shared_dto_union_is_deduplicated() {
+        let modules = find_rpc_modules(SHARED_DTO_SRC);
+        assert_eq!(modules.len(), 2);
+
+        let mut roots: Vec<String> = Vec::new();
+        for m in &modules {
+            roots.extend(referenced_type_names(m));
+        }
+        roots.sort();
+        roots.dedup();
+        let refs = roots.iter().map(String::as_str).collect::<Vec<_>>();
+        let dtos = find_reachable_dtos(SHARED_DTO_SRC, &refs);
+
+        assert_eq!(
+            dtos.iter().filter(|d| d.name() == "Shared").count(),
+            1,
+            "the shared DTO must appear exactly once across the union"
+        );
+        assert_eq!(dtos.iter().filter(|d| d.name() == "Failure").count(), 1);
+        assert!(dtos.iter().any(|d| d.name() == "AReq"));
+        assert!(dtos.iter().any(|d| d.name() == "BReq"));
     }
 
     #[test]
