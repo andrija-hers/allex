@@ -230,6 +230,99 @@ pub fn yyyymmdd(date: NaiveDate) -> String {
     date.format("%Y%m%d").to_string()
 }
 
+const SECS_PER_DAY: i64 = 24 * 60 * 60;
+
+/// A recurring **daily open/close window** on selected weekdays in a timezone — e.g. a market or
+/// trading session that opens and closes each day, possibly spanning midnight.
+///
+/// This is additive to [`Schedule`] (which models a single daily instant); it does **not** change
+/// `Schedule`, `Scheduler`, or `ScheduleProcessor`, so existing dependents need no changes.
+///
+/// Semantics (matching a long-standing production FIX session scheduler, evaluated
+/// in **week-seconds**: `weekday(0=Sun) * 86400 + seconds_of_day`, in the window's timezone):
+///
+/// - `weekly == false` (**daily**): a window on each listed weekday from `open` to `close`. If
+///   `open > close` the window wraps past midnight into the next day (e.g. `23:00 → 15:00`).
+/// - `weekly == true` (**continuous range**): a single window per week. With more than one weekday
+///   it runs `weekdays[0] @ open` → `weekdays[last] @ close`; with exactly one weekday it runs that
+///   day `@ open` → the next day `@ close`.
+///
+/// Both endpoints are inclusive (`open ≤ now ≤ close`), as in the reference implementation.
+///
+/// Note: like the reference, a daily window whose wrap crosses the Saturday→Sunday week boundary is
+/// not matched on the Sunday side (week-seconds don't wrap). Callers needing that should add a
+/// Sunday entry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Window {
+    pub timezone: String,
+    /// Active weekdays, `0 = Sunday … 6 = Saturday`.
+    pub weekdays: Vec<u8>,
+    /// Open time `[hour, minute]`.
+    pub open: [u32; 2],
+    /// Close time `[hour, minute]`.
+    pub close: [u32; 2],
+    /// `true` for a continuous weekly range; `false` for a per-weekday daily window.
+    pub weekly: bool,
+}
+
+impl Window {
+    /// Returns whether `instant` falls inside the window.
+    pub fn in_window_at(&self, instant: DateTime<Utc>) -> Result<bool, ScheduleError> {
+        if self.weekdays.is_empty() {
+            return Ok(false);
+        }
+        let tz: Tz = self
+            .timezone
+            .parse()
+            .map_err(|_| ScheduleError::InvalidTimezone(self.timezone.clone()))?;
+        let local = instant.with_timezone(&tz);
+
+        let dow = local.weekday().num_days_from_sunday() as i64;
+        let now_secs = (local.hour() * 3600 + local.minute() * 60 + local.second()) as i64;
+        let now_ws = dow * SECS_PER_DAY + now_secs;
+
+        let open_s = time_secs(self.open)?;
+        let close_s = time_secs(self.close)?;
+
+        let mut days = self.weekdays.clone();
+        days.sort_unstable();
+
+        if self.weekly {
+            let first = days[0] as i64;
+            let (start, end) = if days.len() > 1 {
+                let last = days[days.len() - 1] as i64;
+                (first * SECS_PER_DAY + open_s, last * SECS_PER_DAY + close_s)
+            } else {
+                (
+                    first * SECS_PER_DAY + open_s,
+                    (first + 1) * SECS_PER_DAY + close_s,
+                )
+            };
+            return Ok(now_ws >= start && now_ws <= end);
+        }
+
+        for d in days {
+            let d = d as i64;
+            let start = d * SECS_PER_DAY + open_s;
+            let mut end = d * SECS_PER_DAY + close_s;
+            if open_s > close_s {
+                end += SECS_PER_DAY; // wraps past midnight
+            }
+            if now_ws >= start && now_ws <= end {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn time_secs([hour, minute]: [u32; 2]) -> Result<i64, ScheduleError> {
+    if hour > 23 || minute > 59 {
+        return Err(ScheduleError::InvalidTime { hour, minute });
+    }
+    Ok((hour * 3600 + minute * 60) as i64)
+}
+
 #[derive(Debug, Error)]
 pub enum SchedulerError<E>
 where
@@ -667,5 +760,93 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 5, 17).expect("expected valid date")
         );
         assert_eq!(scheduler.processor().entries[0].1, "Friday report");
+    }
+
+    // ── Window (ported from that scheduler's JS test suite) ───────────────────
+    // Instants mirror the JS harness: moment().startOf('week') is Sunday 00:00; day ordinals may
+    // exceed 6 (next week). 2024-01-07 is a Sunday (UTC).
+    fn instant(day: i64, h: i64, m: i64, s: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 7, 0, 0, 0).unwrap()
+            + Duration::days(day)
+            + Duration::hours(h)
+            + Duration::minutes(m)
+            + Duration::seconds(s)
+    }
+
+    fn win(weekdays: &[u8], open: [u32; 2], close: [u32; 2], weekly: bool) -> Window {
+        Window {
+            timezone: "UTC".into(),
+            weekdays: weekdays.to_vec(),
+            open,
+            close,
+            weekly,
+        }
+    }
+
+    #[test]
+    fn window_daily() {
+        let w = win(&[1, 4, 5], [10, 0], [15, 0], false);
+        for (d, h, m, s) in [
+            (1, 10, 0, 1),
+            (1, 14, 59, 59),
+            (4, 11, 5, 35),
+            (5, 14, 44, 30),
+            (8, 10, 0, 1),
+        ] {
+            assert!(
+                w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "active {d} {h}:{m}:{s}"
+            );
+        }
+        for (d, h, m, s) in [(0, 11, 48, 55), (1, 21, 44, 30)] {
+            assert!(
+                !w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "inactive {d} {h}:{m}:{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_daily_overnight_wrap() {
+        let w = win(&[1], [23, 0], [15, 0], false);
+        for (d, h, m, s) in [
+            (1, 23, 0, 1),
+            (1, 23, 59, 59),
+            (2, 1, 5, 35),
+            (2, 11, 44, 30),
+        ] {
+            assert!(
+                w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "active {d} {h}:{m}:{s}"
+            );
+        }
+        for (d, h, m, s) in [(0, 11, 48, 55), (1, 11, 44, 30)] {
+            assert!(
+                !w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "inactive {d} {h}:{m}:{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_weekly_range() {
+        let w = win(&[1, 6], [23, 0], [15, 0], true);
+        for (d, h, m, s) in [
+            (1, 23, 0, 1),
+            (2, 23, 59, 59),
+            (9, 1, 5, 35),
+            (6, 11, 44, 30),
+        ] {
+            assert!(
+                w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "active {d} {h}:{m}:{s}"
+            );
+        }
+        for (d, h, m, s) in [(0, 11, 48, 55), (1, 22, 59, 59), (6, 15, 0, 1)] {
+            assert!(
+                !w.in_window_at(instant(d, h, m, s)).unwrap(),
+                "inactive {d} {h}:{m}:{s}"
+            );
+        }
     }
 }
