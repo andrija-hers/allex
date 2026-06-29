@@ -153,6 +153,66 @@ class AllexTransport {
     });
   }
 
+  /// Opens a single-shot streaming call, yielding each decoded **Progress**
+  /// payload as raw JSON (a `Map`, `List`, or scalar).
+  ///
+  /// Unlike [callStreaming], this performs **no** auto-reconnect and applies no
+  /// typed decoding — it is the low-level primitive that state-sync layers such
+  /// as `LiveStateRepository` build their own reconnect loop on top of.
+  ///
+  /// Completes normally when the server sends a terminal `Success` frame or
+  /// closes the stream. Throws [AllexError] on a terminal `Error` frame, a
+  /// non-200 status, or a transport failure.
+  Stream<dynamic> watchRaw(
+    String module,
+    String method,
+    dynamic request,
+  ) async* {
+    final streamed = await _sendWithAuthRetry(
+      module: module,
+      method: method,
+      body: _encodeRpcCall(module, method, request),
+    );
+
+    if (streamed.statusCode != 200) {
+      throw AllexError(
+        _httpErrorMessage(
+          streamed.statusCode,
+          module,
+          method,
+          await streamed.stream.bytesToString(),
+        ),
+        httpStatus: streamed.statusCode,
+      );
+    }
+
+    final buffer = StringBuffer();
+    await for (final chunk in streamed.stream.transform(utf8.decoder)) {
+      buffer.write(chunk);
+      final text = buffer.toString();
+      final lines = text.split('\n');
+      for (final line in lines.sublist(0, lines.length - 1)) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        final frame = jsonDecode(trimmed) as Map<String, dynamic>;
+        if (frame.containsKey('Progress')) {
+          yield _decodePayload(jsonEncode(frame['Progress']));
+        } else if (frame.containsKey('Success')) {
+          return;
+        } else if (frame.containsKey('Error')) {
+          final payload = _decodePayload(jsonEncode(frame['Error']));
+          throw AllexError(
+            'Stream error from $module/$method: '
+            '${payload is String ? payload : jsonEncode(payload)}',
+          );
+        }
+      }
+      buffer
+        ..clear()
+        ..write(lines.last);
+    }
+  }
+
   String _encodeRpcCall(String module, String method, dynamic args) {
     final argBytes = utf8.encode(jsonEncode(args));
     final inner = jsonEncode([
