@@ -8,6 +8,7 @@ members = [
     "message-templates",
     "mailgunner",
     "identity",
+    "identity-sqlite",
     "postgres-macros",
     "postgres",
     "identity-postgres",
