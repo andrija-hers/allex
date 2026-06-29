@@ -827,7 +827,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
         let json_name = serde
             .rename
             .clone()
-            .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+            .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all, RenameTarget::Field));
         let dart_name = snake_to_camel(&rust_name);
         return Some(FieldInfo {
             dart_name,
@@ -843,7 +843,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
     let json_name = serde
         .rename
         .clone()
-        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all, RenameTarget::Field));
     let dart_name = snake_to_camel(&rust_name);
 
     Some(FieldInfo {
@@ -896,7 +896,7 @@ fn extract_variant(
 
     let json_name = serde
         .rename
-        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all, RenameTarget::Variant));
     let dart_suffix = rust_name.clone();
 
     let kind = match &variant.fields {
@@ -1500,25 +1500,87 @@ fn snake_to_camel(s: &str) -> String {
     result
 }
 
-/// Apply a serde `rename_all` rule to a Rust identifier.
-/// Rust identifiers are always `snake_case`, so we only need to handle
-/// conversions away from snake_case.
-fn apply_rename_all(name: &str, rule: Option<&str>) -> String {
+/// Which serde rename context a `rename_all` rule is applied in.
+///
+/// serde uses *different* transforms for the two, because the conventional Rust
+/// casings differ: struct fields are `snake_case`, enum variants are
+/// `PascalCase`. So `rename_all = "snake_case"` is a no-op on a field but maps
+/// `Initial` → `initial` on a variant (and `camelCase` lowercases a variant's
+/// first letter but capitalizes word boundaries in a field).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameTarget {
+    Field,
+    Variant,
+}
+
+/// Apply a serde `rename_all` rule to a Rust identifier, mirroring serde's
+/// `RenameRule::apply_to_field` / `apply_to_variant`.
+fn apply_rename_all(name: &str, rule: Option<&str>, target: RenameTarget) -> String {
+    let rule = match rule {
+        None | Some("none") => return name.to_string(),
+        Some(rule) => rule,
+    };
+    match target {
+        RenameTarget::Field => apply_rename_all_field(name, rule),
+        RenameTarget::Variant => apply_rename_all_variant(name, rule),
+    }
+}
+
+/// serde `RenameRule::apply_to_field` — the input is a `snake_case` field name.
+fn apply_rename_all_field(field: &str, rule: &str) -> String {
     match rule {
-        None | Some("none") => name.to_string(),
-        Some("camelCase") => snake_to_camel(name),
-        Some("PascalCase") => {
-            let camel = snake_to_camel(name);
-            let mut c = camel.chars();
-            c.next()
-                .map(|ch| ch.to_uppercase().collect::<String>() + c.as_str())
-                .unwrap_or_default()
+        // A field is already snake/lowercase, so these are no-ops.
+        "lowercase" | "snake_case" => field.to_string(),
+        "camelCase" => snake_to_camel(field),
+        "PascalCase" => capitalize_first(&snake_to_camel(field)),
+        "SCREAMING_SNAKE_CASE" => field.to_ascii_uppercase(),
+        "kebab-case" => field.replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => field.to_ascii_uppercase().replace('_', "-"),
+        _ => field.to_string(),
+    }
+}
+
+/// serde `RenameRule::apply_to_variant` — the input is a `PascalCase` variant.
+fn apply_rename_all_variant(variant: &str, rule: &str) -> String {
+    match rule {
+        // A variant is already PascalCase, so this is a no-op.
+        "PascalCase" => variant.to_string(),
+        "lowercase" => variant.to_ascii_lowercase(),
+        "camelCase" => lowercase_first(variant),
+        "snake_case" => pascal_to_snake(variant),
+        "SCREAMING_SNAKE_CASE" => pascal_to_snake(variant).to_ascii_uppercase(),
+        "kebab-case" => pascal_to_snake(variant).replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => pascal_to_snake(variant).to_ascii_uppercase().replace('_', "-"),
+        _ => variant.to_string(),
+    }
+}
+
+/// `PascalCase` → `snake_case` (serde's variant `SnakeCase` rule: lowercase and
+/// insert `_` before each interior uppercase letter).
+fn pascal_to_snake(variant: &str) -> String {
+    let mut snake = String::new();
+    for (i, ch) in variant.char_indices() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            snake.push('_');
         }
-        Some("SCREAMING_SNAKE_CASE") => name.to_ascii_uppercase(),
-        Some("kebab-case") => name.replace('_', "-"),
-        Some("SCREAMING-KEBAB-CASE") => name.to_ascii_uppercase().replace('_', "-"),
-        // "snake_case", "lowercase", and anything unrecognised: keep as-is.
-        _ => name.to_string(),
+        snake.push(ch.to_ascii_lowercase());
+    }
+    snake
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -1732,6 +1794,38 @@ mod tests {
         assert!(dart.contains("'Overflow' => const ArithmeticErrorOverflow(),"));
     }
 
+    // Internally-tagged enum (`#[serde(tag = "...", rename_all = "...")]`): the
+    // wire tag for each PascalCase variant must be transformed by rename_all.
+    // Regression guard for the bug where variant tags were emitted verbatim.
+    const TAGGED_ENUM_DTOS: &str = r#"
+        #[derive(Serialize, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        pub enum StreamProgress {
+            Initial { snapshot: i32 },
+            UpdateBatch { count: u64 },
+        }
+    "#;
+
+    #[test]
+    fn renders_enum_internal_applies_rename_all_to_tags() {
+        let dtos = find_dto_types(TAGGED_ENUM_DTOS);
+        let dart = render_dart_dtos("demo", &dtos, &[]);
+
+        // fromJson switches on the snake_case wire tags, not the Rust names.
+        assert!(dart.contains("'initial' => StreamProgressInitial.fromJson(map),"));
+        assert!(dart.contains("'update_batch' => StreamProgressUpdateBatch.fromJson(map),"));
+        assert!(!dart.contains("'Initial' =>"), "tag must be snake_case, not the Rust variant name");
+        assert!(!dart.contains("'UpdateBatch' =>"));
+
+        // toJson emits the snake_case tag.
+        assert!(dart.contains("'type': 'initial'"));
+        assert!(dart.contains("'type': 'update_batch'"));
+
+        // Dart class names still derive from the Rust variant identifier.
+        assert!(dart.contains("final class StreamProgressInitial extends StreamProgress {"));
+        assert!(dart.contains("final class StreamProgressUpdateBatch extends StreamProgress {"));
+    }
+
     #[test]
     fn renders_dart_client_imports_dtos() {
         let modules = find_rpc_modules(ARITHMETIC_TRAIT);
@@ -1796,18 +1890,62 @@ mod tests {
 
     #[test]
     fn apply_rename_all_cases() {
+        use RenameTarget::{Field, Variant};
+
+        // Fields are snake_case in Rust.
         assert_eq!(
-            apply_rename_all("hello_world", Some("camelCase")),
+            apply_rename_all("hello_world", Some("camelCase"), Field),
             "helloWorld"
         );
         assert_eq!(
-            apply_rename_all("hello_world", Some("PascalCase")),
+            apply_rename_all("hello_world", Some("PascalCase"), Field),
             "HelloWorld"
         );
         assert_eq!(
-            apply_rename_all("hello_world", Some("SCREAMING_SNAKE_CASE")),
+            apply_rename_all("hello_world", Some("SCREAMING_SNAKE_CASE"), Field),
             "HELLO_WORLD"
         );
-        assert_eq!(apply_rename_all("hello_world", None), "hello_world");
+        assert_eq!(
+            apply_rename_all("hello_world", Some("snake_case"), Field),
+            "hello_world"
+        );
+        assert_eq!(apply_rename_all("hello_world", None, Field), "hello_world");
+
+        // Variants are PascalCase in Rust — these were previously emitted
+        // verbatim, ignoring rename_all (the bug this fixes).
+        assert_eq!(
+            apply_rename_all("Initial", Some("snake_case"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("snake_case"), Variant),
+            "on_data_pricing"
+        );
+        assert_eq!(
+            apply_rename_all("Initial", Some("camelCase"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("camelCase"), Variant),
+            "onDataPricing"
+        );
+        assert_eq!(
+            apply_rename_all("Initial", Some("lowercase"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("SCREAMING_SNAKE_CASE"), Variant),
+            "ON_DATA_PRICING"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("kebab-case"), Variant),
+            "on-data-pricing"
+        );
+        // No rule / PascalCase: variant stays as-is.
+        assert_eq!(apply_rename_all("Initial", None, Variant), "Initial");
+        assert_eq!(
+            apply_rename_all("Initial", Some("PascalCase"), Variant),
+            "Initial"
+        );
     }
 }
