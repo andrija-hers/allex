@@ -1,0 +1,17 @@
+[package]
+name = "allex-guards"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_guards"
+path = "./lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time", "macros", "rt-multi-thread"] }

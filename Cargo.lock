@@ -41,6 +41,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-guards"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "allex-identity"
 version = "0.1.0"
 dependencies = [
@@ -186,6 +194,7 @@ version = "0.1.0"
 dependencies = [
  "allex-progressable-future",
  "allex-state-macro",
+ "serde",
  "tokio",
  "tokio-stream",
 ]

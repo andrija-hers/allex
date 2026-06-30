@@ -23,4 +23,5 @@ members = [
     "scheduler",
     "serve",
     "keyed-events",
+    "guards",
 ]

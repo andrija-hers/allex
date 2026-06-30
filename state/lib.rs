@@ -1,12 +1,44 @@
 //! Generic path-addressed state with change-suppressing mutations.
 //!
+//! # Communicating state to the outer world: the **snapshot-deltas pattern**
+//!
+//! This is the one blessed way to stream a live collection/state to clients
+//! (a UI grid, a remote mirror, another service). See `SNAPSHOT-DELTAS.md` in
+//! this crate for the full guide.
+//!
+//! - **First frame is the full snapshot.** A new (or reconnecting) client gets
+//!   one complete picture to start from — [`StateFrame::Initial`].
+//! - **Every subsequent frame is a *delta*** — only what changed since the last
+//!   frame ([`StateFrame::Update`]). The client applies it to the snapshot it
+//!   already holds.
+//! - Use [`LocalState::watch_snapshot_deltas`] to get exactly this: it sends the
+//!   snapshot once (with version-dedup so a reconnecting client that already has
+//!   version *N* skips it), then diffs consecutive states into update frames.
+//!
+//! **A full snapshot per frame is NOT the way to communicate.** Re-sending the
+//! whole collection on every change is the anti-pattern that motivated this
+//! crate: it burns CPU and allocator memory rebuilding state the client could
+//! derive from a delta, bloats every frame, and rebuilds — *on the server* —
+//! something the client can produce itself. The server should do its work and
+//! tell the outer world only *what changed*; nothing the client can reconstruct
+//! should be rebuilt server-side. (Note: the *in-process* `watch` inside
+//! [`LocalState`] holding the full value is fine — the rule is about the
+//! **outward wire boundary**, not internal storage.)
+//!
+//! [`LocalState::subscribe`] / [`LocalState::watch_progressable`] yield the full
+//! value per change; they're for *in-process* mirrors and local logic, **not**
+//! the outward streaming boundary. For that, reach for
+//! [`watch_snapshot_deltas`](LocalState::watch_snapshot_deltas).
+//!
 //! # Core concepts
 //!
 //! - [`HasUpdate`] — implemented by any struct that derives [`State`]; links
 //!   a state type to its generated `Update` enum and `apply_update`.
 //! - [`LocalState<S>`] — authoritative, in-process state store.  Clonable
 //!   handle; all clones share the same underlying value.  Broadcasts the full
-//!   new state to subscribers on every *non-suppressed* mutation.
+//!   new state to *in-process* subscribers on every *non-suppressed* mutation.
+//! - [`StateFrame<S, C>`] + [`LocalState::watch_snapshot_deltas`] — the
+//!   snapshot-deltas streaming boundary for clients.
 //! - [`StateHandle<S>`] — for concurrent tasks that own a sub-tree.  Wraps a
 //!   `LocalState<Root>` together with a path-lifting closure so the task can
 //!   call `handle.apply(leaf_update)` and have it arrive at the root correctly.
@@ -22,9 +54,46 @@ pub use allex_state_macro::State;
 pub use allex_state_macro::state_type;
 
 use progressable_future::{ProgressSender, ProgressableFuture};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tokio_stream::{Stream, wrappers::WatchStream};
+
+// ---------------------------------------------------------------------------
+// StateFrame — the snapshot-deltas wire frame
+// ---------------------------------------------------------------------------
+
+/// One frame in the **snapshot-deltas** protocol (see the crate docs).
+///
+/// The first frame a client receives is [`StateFrame::Initial`] (a full
+/// snapshot); every frame after is a [`StateFrame::Update`] carrying only the
+/// changes since the previous frame. The client keeps the snapshot it holds and
+/// applies each update's `changes` to it — the server never re-sends the whole
+/// collection.
+///
+/// `S` is your state's snapshot type; `C` is *your* change type — typically an
+/// `enum { Upsert(item), Remove(key) }` keyed by domain identity. Only the app
+/// knows that identity, so the `diff` that produces `Vec<C>` is the one
+/// app-specific piece (see [`LocalState::watch_snapshot_deltas`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum StateFrame<S, C> {
+    /// First frame, or a forced resync: the full snapshot plus its version.
+    Initial {
+        /// Monotonic version of this snapshot — clients echo it back as
+        /// `known_version` on reconnect to skip a redundant initial frame.
+        version: u64,
+        /// The complete state.
+        snapshot: S,
+    },
+    /// A delta: only what changed since the previous frame.
+    Update {
+        /// Version after applying these changes.
+        version: u64,
+        /// The changes to apply to the client's held snapshot.
+        changes: Vec<C>,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // HasUpdate — the core trait implemented by #[derive(State)]
@@ -158,6 +227,81 @@ impl<S: HasUpdate> LocalState<S> {
                 }
                 let snap = receiver.borrow_and_update().clone();
                 sender.progress(map(snap));
+            }
+        })
+    }
+
+    /// Stream this state to a client using the **snapshot-deltas pattern** — the
+    /// blessed way to communicate a live state outward (see the crate docs).
+    ///
+    /// Emits one [`StateFrame::Initial`] (the full snapshot) up front — unless
+    /// `known_version` matches the current version, in which case a reconnecting
+    /// client already has it and the initial frame is skipped — then one
+    /// [`StateFrame::Update`] per change, carrying only `diff(previous, current)`.
+    /// Empty diffs are suppressed (no idle frames).
+    ///
+    /// You supply two small closures:
+    /// - `version_of` — extract the monotonic version from a snapshot (usually a
+    ///   `version` field bumped on every mutation).
+    /// - `diff` — compute the changes between two snapshots. This is the only
+    ///   app-specific piece, because only you know domain identity (keys); a
+    ///   typical `C` is `enum { Upsert(item), Remove(key) }`.
+    ///
+    /// The underlying `watch` coalesces — a slow client that misses intermediate
+    /// states still gets a correct net delta, because `diff` is computed against
+    /// the last state *this stream* actually sent. No lag-resync bookkeeping
+    /// needed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// state.watch_snapshot_deltas(
+    ///     req.known_version,
+    ///     |s| s.version,
+    ///     |prev, cur| row_changes(prev, cur), // your Upsert/Remove diff
+    ///     || StateClosedError,
+    /// )
+    /// ```
+    pub fn watch_snapshot_deltas<C, T, E, FV, FD, FE>(
+        &self,
+        known_version: Option<u64>,
+        version_of: FV,
+        diff: FD,
+        on_closed: FE,
+    ) -> ProgressableFuture<StateFrame<S, C>, T, E>
+    where
+        C: Send + 'static,
+        S: Send,
+        T: From<std::convert::Infallible> + Send + 'static,
+        E: Send + 'static,
+        FV: Fn(&S) -> u64 + Send + 'static,
+        FD: Fn(&S, &S) -> Vec<C> + Send + 'static,
+        FE: FnOnce() -> E + Send + 'static,
+    {
+        // Subscribe before reading current so no change is missed.
+        let mut receiver = self.tx.subscribe();
+        ProgressableFuture::new(move |sender: ProgressSender<StateFrame<S, C>>| async move {
+            let mut previous = receiver.borrow_and_update().clone();
+            let init_version = version_of(&previous);
+            // Initial frame = full snapshot, unless the client already has it.
+            if known_version != Some(init_version) {
+                sender.progress(StateFrame::Initial {
+                    version: init_version,
+                    snapshot: previous.clone(),
+                });
+            }
+            loop {
+                if receiver.changed().await.is_err() {
+                    return Err(on_closed());
+                }
+                let current = receiver.borrow_and_update().clone();
+                let changes = diff(&previous, &current);
+                if !changes.is_empty() {
+                    sender.progress(StateFrame::Update {
+                        version: version_of(&current),
+                        changes,
+                    });
+                }
+                previous = current;
             }
         })
     }
