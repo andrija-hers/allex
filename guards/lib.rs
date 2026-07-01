@@ -447,18 +447,100 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod platform {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    /// `(free_bytes_available_to_caller, total_bytes)` for the volume holding `path`, via
+    /// `GetDiskFreeSpaceExW`. The "available to caller" figure honours per-user quotas, mirroring the
+    /// Unix `f_bavail` (available to an unprivileged process) — so the disk gauge means the same thing
+    /// on both platforms.
+    pub fn disk_free_total(path: &Path) -> io::Result<(u64, u64)> {
+        // GetDiskFreeSpaceExW resolves free space for a *directory*; handed a file path (e.g. the redb
+        // store file) it fails. Resolve to the containing directory when `path` isn't one itself, so
+        // the gauge keeps the Unix `statvfs(path)` contract of "the volume containing `path`".
+        let dir = if path.is_dir() {
+            path
+        } else {
+            match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            }
+        };
+        // Pass the directory as a NUL-terminated wide string.
+        let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut free_to_caller: u64 = 0;
+        let mut total: u64 = 0;
+        // SAFETY: `wide` is a valid NUL-terminated UTF-16 path; the out-pointers are valid for the
+        // call and the two we read are fully written on success (the third — total free — is unused).
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_to_caller,
+                &mut total,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((free_to_caller, total))
+    }
+
+    /// `(available_bytes, total_bytes)` of physical memory, via `GlobalMemoryStatusEx`. `ullAvailPhys`
+    /// is the box-wide "about to swap" headroom; `ullTotalPhys` is installed physical RAM. Mirrors
+    /// Linux `MemAvailable` / `MemTotal`.
+    pub fn system_mem_avail_total() -> io::Result<(u64, u64)> {
+        // SAFETY: a zeroed MEMORYSTATUSEX with `dwLength` set is the documented input; the kernel
+        // fully writes the struct on success.
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((status.ullAvailPhys, status.ullTotalPhys))
+    }
+
+    /// Resident set size of this process = the Win32 **working set** (`WorkingSetSize` from
+    /// `GetProcessMemoryInfo`), the closest analogue to Unix RSS. We use the kernel32-exported
+    /// `K32GetProcessMemoryInfo` so no separate `psapi.dll` link is needed.
+    pub fn process_rss() -> io::Result<u64> {
+        // SAFETY: a zeroed PROCESS_MEMORY_COUNTERS with `cb` set is the documented input;
+        // `GetCurrentProcess` returns a pseudo-handle that needs no close; the struct is fully
+        // written on success.
+        let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok =
+            unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(counters.WorkingSetSize as u64)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod platform {
     use std::io;
     use std::path::Path;
 
-    // TODO(windows): implement via `GetDiskFreeSpaceExW`, `GlobalMemoryStatusEx` and
-    // `GetProcessMemoryInfo` (this is why the gauges live in the platform). Until then, a non-Unix
-    // host errors per-sample, which makes the watchdog hold `Ok` (it never false-trips a retreat).
+    // Unix and Windows are implemented above; any other target (e.g. wasm) errors per-sample, which
+    // makes the watchdog hold `Ok` (it never false-trips a retreat).
     fn unsupported<T>() -> io::Result<T> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "allex-guards: resource measurement not yet implemented on this platform (Windows: TODO)",
+            "allex-guards: resource measurement not implemented on this platform",
         ))
     }
     pub fn disk_free_total(_path: &Path) -> io::Result<(u64, u64)> {
@@ -523,10 +605,15 @@ mod tests {
     }
 
     #[test]
-    fn real_gauges_read_on_unix() {
-        // Disk on the crate dir, system RAM, and a budget — all should sample without error here.
+    fn real_gauges_read() {
+        // Disk on the crate dir, system RAM, and a budget — all should sample without error on every
+        // platform with a `platform` impl (Unix via statvfs/proc, Windows via the Win32 calls).
         let disk = DiskGauge::new(".").sample().unwrap();
         assert!(disk.total_bytes > 0 && disk.headroom_bytes > 0);
+        // A *file* path must also resolve (Windows `GetDiskFreeSpaceExW` needs a directory, so the
+        // gauge resolves a file to its parent; Unix `statvfs` takes either). `Cargo.toml` always exists.
+        let disk_file = DiskGauge::new("Cargo.toml").sample().unwrap();
+        assert!(disk_file.total_bytes > 0);
         let ram = RamGauge::system().sample().unwrap();
         assert!(ram.total_bytes > 0);
         let budget = RamGauge::budget(64 << 20).sample().unwrap();
