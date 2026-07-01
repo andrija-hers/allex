@@ -182,7 +182,9 @@ async fn refresh_token_reuse_within_grace_returns_successor() {
         })
         .await
         .unwrap();
-    let successor = first.refresh_token.expect("first refresh mints a successor");
+    let successor = first
+        .refresh_token
+        .expect("first refresh mints a successor");
 
     let second = store
         .refresh(RefreshRequest { refresh_token })

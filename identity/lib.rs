@@ -1,5 +1,8 @@
 //! Identity service contracts and an in-memory reference implementation.
 
+// The in-memory store holds a few intentionally-nested `Arc<Mutex<HashMap<..>>>` maps.
+#![allow(clippy::type_complexity)]
+
 mod types;
 pub use types::*;
 mod store;

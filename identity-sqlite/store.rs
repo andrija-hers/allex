@@ -33,10 +33,7 @@ pub struct SqliteIdentityStore {
 }
 
 impl SqliteIdentityStore {
-    pub fn new(
-        path: impl AsRef<Path>,
-        secret: impl Into<String>,
-    ) -> Result<Self, std::io::Error> {
+    pub fn new(path: impl AsRef<Path>, secret: impl Into<String>) -> Result<Self, std::io::Error> {
         Self::new_with_ttl(path, secret, 3600, 7 * 24 * 3600)
     }
 
@@ -299,19 +296,20 @@ impl IdentityV1 for SqliteIdentityStore {
         async move {
             let s = store.clone();
             let handle = req.handle.clone();
-            let (password_hash, role) = tokio::task::spawn_blocking(move || -> Result<(String, String), IdentityError> {
-                let conn = s.open_conn()?;
-                conn.query_row(
-                    "SELECT password_hash, role FROM users WHERE handle = ?1",
-                    params![handle],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(db_err)?
-                .ok_or(IdentityError::InvalidCredentials)
-            })
-            .await
-            .map_err(|e| IdentityError::Internal(e.to_string()))??;
+            let (password_hash, role) =
+                tokio::task::spawn_blocking(move || -> Result<(String, String), IdentityError> {
+                    let conn = s.open_conn()?;
+                    conn.query_row(
+                        "SELECT password_hash, role FROM users WHERE handle = ?1",
+                        params![handle],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(db_err)?
+                    .ok_or(IdentityError::InvalidCredentials)
+                })
+                .await
+                .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
             let password = req.password.clone();
             let valid = tokio::task::spawn_blocking(move || {

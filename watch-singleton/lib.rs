@@ -83,6 +83,12 @@ pub struct WatchSingleton<C> {
     tx: OnceLock<watch::Sender<Arc<C>>>,
 }
 
+impl<C: Send + Sync + 'static> Default for WatchSingleton<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<C: Send + Sync + 'static> WatchSingleton<C> {
     pub const fn new() -> Self {
         Self {

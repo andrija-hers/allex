@@ -15,6 +15,11 @@ impl Payload {
         self.0.len()
     }
 
+    /// Returns whether the payload has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Borrows the underlying serialized bytes.
     pub fn get_bytes(&self) -> &[u8] {
         &self.0
@@ -139,11 +144,11 @@ impl ModuleMethodCall {
     }
     /// Returns the targeted method name.
     pub fn get_method(&self) -> &str {
-        &self.1.get_method()
+        self.1.get_method()
     }
     /// Returns the encoded request payload.
     pub fn get_payload(&self) -> &Payload {
-        &self.1.get_payload()
+        self.1.get_payload()
     }
 }
 
@@ -170,15 +175,15 @@ impl RelayedModuleMethodCall {
     }
     /// Returns the targeted module name.
     pub fn get_module(&self) -> &str {
-        &self.1.get_module()
+        self.1.get_module()
     }
     /// Returns the targeted method name.
     pub fn get_method(&self) -> &str {
-        &self.1.get_method()
+        self.1.get_method()
     }
     /// Returns the encoded request payload.
     pub fn get_payload(&self) -> &Payload {
-        &self.1.get_payload()
+        self.1.get_payload()
     }
 }
 

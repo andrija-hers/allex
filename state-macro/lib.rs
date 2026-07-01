@@ -597,16 +597,13 @@ fn nested_update_ty(ty: &Type) -> TokenStream2 {
 }
 
 fn vec_item_ty(ty: &Type) -> &Type {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Vec" {
-                if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return inner;
-                    }
-                }
-            }
-        }
+    if let Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Vec"
+        && let syn::PathArguments::AngleBracketed(ref args) = seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return inner;
     }
     panic!("#[state(vec)] field must be Vec<T>")
 }

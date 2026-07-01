@@ -51,7 +51,9 @@ impl ServerSideOneShotTransportItem for AxumOneShotItem {
     async fn respond_with(self, payload: Payload) -> Result<()> {
         self.response
             .send(AxumResponse::Unary(payload))
-            .map_err(|_| Error::SendRequest(format!("Could not send response, the caller dropped")))
+            .map_err(|_| {
+                Error::SendRequest("Could not send response, the caller dropped".to_string())
+            })
     }
 }
 

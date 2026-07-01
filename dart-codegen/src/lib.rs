@@ -295,10 +295,10 @@ pub fn find_rpc_modules(source: &str) -> Vec<RpcModuleInfo> {
     file.items
         .iter()
         .filter_map(|item| {
-            if let syn::Item::Trait(t) = item {
-                if has_attr(&t.attrs, "rpc_module") {
-                    return extract_module_info(t);
-                }
+            if let syn::Item::Trait(t) = item
+                && has_attr(&t.attrs, "rpc_module")
+            {
+                return extract_module_info(t);
             }
             None
         })
@@ -594,31 +594,30 @@ fn extract_method_kind(method: &TraitItemFn) -> Option<MethodKind> {
         });
     }
 
-    if let Some(types) = path_type_args(return_ty, "ProgressableFuture") {
-        if types.len() >= 3 {
-            return Some(MethodKind::Streaming {
-                progress_type: rpc_type_info(&types[0]),
-                success_type: rpc_type_info(&types[1]),
-                error_type: rpc_type_info(&types[2]),
-            });
-        }
+    if let Some(types) = path_type_args(return_ty, "ProgressableFuture")
+        && types.len() >= 3
+    {
+        return Some(MethodKind::Streaming {
+            progress_type: rpc_type_info(&types[0]),
+            success_type: rpc_type_info(&types[1]),
+            error_type: rpc_type_info(&types[2]),
+        });
     }
 
     if let Type::ImplTrait(impl_trait) = return_ty {
         for bound in &impl_trait.bounds {
-            if let TypeParamBound::Trait(tb) = bound {
-                if let Some(args) = angle_args_for_last_segment(tb.path.segments.last(), "Future") {
-                    for arg in &args.args {
-                        if let GenericArgument::AssocType(assoc) = arg {
-                            if assoc.ident == "Output" {
-                                if let Some((s, e)) = extract_result_types(&assoc.ty) {
-                                    return Some(MethodKind::Unary {
-                                        success_type: s,
-                                        error_type: e,
-                                    });
-                                }
-                            }
-                        }
+            if let TypeParamBound::Trait(tb) = bound
+                && let Some(args) = angle_args_for_last_segment(tb.path.segments.last(), "Future")
+            {
+                for arg in &args.args {
+                    if let GenericArgument::AssocType(assoc) = arg
+                        && assoc.ident == "Output"
+                        && let Some((s, e)) = extract_result_types(&assoc.ty)
+                    {
+                        return Some(MethodKind::Unary {
+                            success_type: s,
+                            error_type: e,
+                        });
                     }
                 }
             }
@@ -754,12 +753,12 @@ fn extract_roles(attrs: &[Attribute]) -> (bool, Vec<String>) {
     }
     let mut roles = Vec::new();
     for attr in attrs {
-        if attr.path().is_ident("allowed_roles") {
-            if let Ok(parsed) = attr.parse_args_with(
+        if attr.path().is_ident("allowed_roles")
+            && let Ok(parsed) = attr.parse_args_with(
                 syn::punctuated::Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated,
-            ) {
-                roles.extend(parsed.into_iter().map(|s| s.value()));
-            }
+            )
+        {
+            roles.extend(parsed.into_iter().map(|s| s.value()));
         }
     }
     (false, roles)
@@ -1355,18 +1354,18 @@ fn rust_type_to_dart(ty: &Type) -> DartType {
                 "String" | "str" => DartType::DartString,
                 "Infallible" | "Never" => DartType::Never,
                 "Option" => {
-                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                            return DartType::Nullable(Box::new(rust_type_to_dart(inner)));
-                        }
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(GenericArgument::Type(inner)) = args.args.first()
+                    {
+                        return DartType::Nullable(Box::new(rust_type_to_dart(inner)));
                     }
                     DartType::Nullable(Box::new(DartType::Unknown("?".into())))
                 }
                 "Vec" => {
-                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(GenericArgument::Type(elem)) = args.args.first() {
-                            return DartType::List(Box::new(rust_type_to_dart(elem)));
-                        }
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(GenericArgument::Type(elem)) = args.args.first()
+                    {
+                        return DartType::List(Box::new(rust_type_to_dart(elem)));
                     }
                     DartType::List(Box::new(DartType::Unknown("?".into())))
                 }
@@ -1405,8 +1404,8 @@ fn rust_type_to_dart(ty: &Type) -> DartType {
 /// `type_str()` emits, so the format is tightly controlled.
 fn restore_dart_type(s: &str) -> DartType {
     let s = s.trim();
-    if s.ends_with('?') {
-        let inner = restore_dart_type(&s[..s.len() - 1]);
+    if let Some(inner) = s.strip_suffix('?') {
+        let inner = restore_dart_type(inner);
         return DartType::Nullable(Box::new(inner));
     }
     if s.starts_with("List<") && s.ends_with('>') {
@@ -1550,7 +1549,9 @@ fn apply_rename_all_variant(variant: &str, rule: &str) -> String {
         "snake_case" => pascal_to_snake(variant),
         "SCREAMING_SNAKE_CASE" => pascal_to_snake(variant).to_ascii_uppercase(),
         "kebab-case" => pascal_to_snake(variant).replace('_', "-"),
-        "SCREAMING-KEBAB-CASE" => pascal_to_snake(variant).to_ascii_uppercase().replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => pascal_to_snake(variant)
+            .to_ascii_uppercase()
+            .replace('_', "-"),
         _ => variant.to_string(),
     }
 }
@@ -1814,7 +1815,10 @@ mod tests {
         // fromJson switches on the snake_case wire tags, not the Rust names.
         assert!(dart.contains("'initial' => StreamProgressInitial.fromJson(map),"));
         assert!(dart.contains("'update_batch' => StreamProgressUpdateBatch.fromJson(map),"));
-        assert!(!dart.contains("'Initial' =>"), "tag must be snake_case, not the Rust variant name");
+        assert!(
+            !dart.contains("'Initial' =>"),
+            "tag must be snake_case, not the Rust variant name"
+        );
         assert!(!dart.contains("'UpdateBatch' =>"));
 
         // toJson emits the snake_case tag.

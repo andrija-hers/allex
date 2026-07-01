@@ -9,15 +9,13 @@ fn column_name_for_field(field: &syn::Field) -> String {
             let args = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated);
             if let Ok(metas) = args {
                 for meta in metas {
-                    if let Meta::NameValue(nv) = meta {
-                        if nv.path.is_ident("rename") {
-                            if let syn::Expr::Lit(syn::ExprLit {
-                                lit: Lit::Str(s), ..
-                            }) = &nv.value
-                            {
-                                return s.value();
-                            }
-                        }
+                    if let Meta::NameValue(nv) = meta
+                        && nv.path.is_ident("rename")
+                        && let syn::Expr::Lit(syn::ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = &nv.value
+                    {
+                        return s.value();
                     }
                 }
             }

@@ -1,3 +1,7 @@
+// This test drives the generated RPC client, whose methods return `-> impl Future + Send` (they
+// implement trait signatures written that way); silence the async-fn suggestion for the whole file.
+#![allow(clippy::manual_async_fn)]
+
 use std::{
     future::Future,
     sync::atomic::{AtomicUsize, Ordering},

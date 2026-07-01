@@ -41,6 +41,8 @@ impl Region {
     }
 
     /// Parse `"us"`/`"eu"` (case-insensitive). Returns `None` for anything else.
+    // Returns `Option<Self>` (not `Result`) so it deliberately doesn't match the `FromStr` trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.trim().to_lowercase().as_str() {
             "us" | "usa" | "" => Some(Region::Us),
@@ -222,6 +224,9 @@ impl Mailgun {
             });
         }
 
-        response.json::<SendResponse>().await.map_err(MailgunError::Http)
+        response
+            .json::<SendResponse>()
+            .await
+            .map_err(MailgunError::Http)
     }
 }

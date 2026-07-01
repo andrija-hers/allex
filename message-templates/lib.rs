@@ -16,6 +16,8 @@ impl TemplateChannel {
         }
     }
 
+    // Returns `Option<Self>` (not `Result`) so it deliberately doesn't match the `FromStr` trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "email" => Some(Self::Email),

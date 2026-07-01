@@ -45,7 +45,10 @@ fn login(handle: &str, password: &str) -> LoginRequest {
 #[tokio::test]
 async fn setup_is_idempotent() {
     let (store, _dir) = start_store().await;
-    store.setup().await.expect("second setup call must be idempotent");
+    store
+        .setup()
+        .await
+        .expect("second setup call must be idempotent");
 }
 
 #[tokio::test]
@@ -54,7 +57,10 @@ async fn register_creates_user_and_returns_valid_jwt() {
     let resp = store.register(reg("alice", "s3cr3t")).await.unwrap();
     assert!(!resp.token.is_empty());
     assert!(resp.refresh_token.is_some());
-    let role_resp = store.validate(ValidateRequest { token: resp.token }).await.unwrap();
+    let role_resp = store
+        .validate(ValidateRequest { token: resp.token })
+        .await
+        .unwrap();
     assert_eq!(role_resp.role, "user");
 }
 
@@ -73,7 +79,10 @@ async fn login_valid_credentials_returns_jwt() {
     let resp = store.login(login("carol", "my-password")).await.unwrap();
     assert!(!resp.token.is_empty());
     assert!(resp.refresh_token.is_some());
-    let role_resp = store.validate(ValidateRequest { token: resp.token }).await.unwrap();
+    let role_resp = store
+        .validate(ValidateRequest { token: resp.token })
+        .await
+        .unwrap();
     assert_eq!(role_resp.role, "user");
 }
 
@@ -99,12 +108,17 @@ async fn refresh_returns_new_token_pair() {
     let refresh_token = resp.refresh_token.unwrap();
 
     let refreshed = store
-        .refresh(RefreshRequest { refresh_token: refresh_token.clone() })
+        .refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        })
         .await
         .unwrap();
     assert!(!refreshed.token.is_empty());
     assert!(refreshed.refresh_token.is_some());
-    assert_ne!(refreshed.refresh_token.as_deref(), Some(refresh_token.as_str()));
+    assert_ne!(
+        refreshed.refresh_token.as_deref(),
+        Some(refresh_token.as_str())
+    );
 }
 
 #[tokio::test]
@@ -113,9 +127,17 @@ async fn refresh_token_cannot_be_reused() {
     let resp = store.register(reg("eve_r2", "pass")).await.unwrap();
     let refresh_token = resp.refresh_token.unwrap();
 
-    store.refresh(RefreshRequest { refresh_token: refresh_token.clone() }).await.unwrap();
+    store
+        .refresh(RefreshRequest {
+            refresh_token: refresh_token.clone(),
+        })
+        .await
+        .unwrap();
 
-    let err = store.refresh(RefreshRequest { refresh_token }).await.unwrap_err();
+    let err = store
+        .refresh(RefreshRequest { refresh_token })
+        .await
+        .unwrap_err();
     assert!(matches!(err, IdentityError::InvalidRefreshToken));
 }
 

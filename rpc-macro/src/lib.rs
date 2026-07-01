@@ -324,6 +324,9 @@ struct MethodInfo {
     doc_attrs: Vec<Attribute>,
 }
 
+// The `Unary`/`Streaming` variants legitimately differ in size; this is a small compile-time-only
+// enum in the proc-macro, so boxing to equalise them isn't worth it.
+#[allow(clippy::large_enum_variant)]
 enum MethodKind {
     Unary {
         success_ty: Type,
@@ -763,7 +766,7 @@ fn parse_roles_spec(attrs: &[Attribute]) -> syn::Result<RolesSpec> {
     for attr in attrs {
         if attr.path().is_ident("allowed_roles") {
             let parsed = attr.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)?;
-            roles.extend(parsed.into_iter());
+            roles.extend(parsed);
         }
     }
 
@@ -888,11 +891,11 @@ fn extract_future_result_types(ty: &Type) -> syn::Result<Option<(Type, Type)>> {
         };
 
         for arg in &args.args {
-            if let GenericArgument::AssocType(assoc) = arg {
-                if assoc.ident == "Output" {
-                    let (success_ty, error_ty) = extract_result_types(&assoc.ty)?;
-                    return Ok(Some((success_ty, error_ty)));
-                }
+            if let GenericArgument::AssocType(assoc) = arg
+                && assoc.ident == "Output"
+            {
+                let (success_ty, error_ty) = extract_result_types(&assoc.ty)?;
+                return Ok(Some((success_ty, error_ty)));
             }
         }
     }

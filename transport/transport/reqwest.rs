@@ -149,7 +149,7 @@ impl OneShotTransport for HttpTransport {
                     "Could not send {} bytes to {}: {}",
                     payload.len(),
                     url,
-                    e.to_string()
+                    e
                 ))
             })?;
 

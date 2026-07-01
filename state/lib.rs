@@ -416,6 +416,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    #[allow(dead_code)] // LabelChanged / set_label are fixture scaffolding not every test exercises
     enum CounterUpdate {
         ValueChanged(i32),
         LabelChanged(String),
@@ -439,6 +440,7 @@ mod tests {
             self.value = v;
             Some(CounterUpdate::ValueChanged(v))
         }
+        #[allow(dead_code)]
         fn set_label(&mut self, s: String) -> Option<CounterUpdate> {
             if self.label == s {
                 return None;

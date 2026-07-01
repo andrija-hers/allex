@@ -15,6 +15,12 @@ pub struct Registry {
     streaming: DashMap<String, Arc<dyn StreamingMethodExecutor>>,
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registry {
     /// Creates an empty registry.
     pub fn new() -> Self {
@@ -37,8 +43,7 @@ impl Registry {
 
     /// Registers a module's streaming methods keyed by module name.
     pub fn register_streaming_module(&self, module: Arc<dyn StreamingMethodExecutor>) {
-        self.streaming
-            .insert(module.get_name().to_string(), module);
+        self.streaming.insert(module.get_name().to_string(), module);
     }
 
     /// Registers a generated responder for BOTH unary and streaming dispatch in
@@ -48,10 +53,14 @@ impl Registry {
     where
         M: MethodExecutor + StreamingMethodExecutor + 'static,
     {
-        self.modules
-            .insert(MethodExecutor::get_name(&*module).to_string(), module.clone());
-        self.streaming
-            .insert(StreamingMethodExecutor::get_name(&*module).to_string(), module);
+        self.modules.insert(
+            MethodExecutor::get_name(&*module).to_string(),
+            module.clone(),
+        );
+        self.streaming.insert(
+            StreamingMethodExecutor::get_name(&*module).to_string(),
+            module,
+        );
     }
 
     /// Begins a streaming method on a registered module, or returns `None` if the

@@ -6,7 +6,7 @@ use tokio_stream::StreamExt;
 // ===========================================================================
 
 #[derive(State, Clone, Debug, PartialEq)]
-struct Leaf {
+pub struct Leaf {
     #[state]
     value: i32,
     #[state]
@@ -205,7 +205,7 @@ async fn local_state_no_broadcast_on_suppression() {
 
 #[state_type]
 #[derive(Clone, Debug, PartialEq)]
-struct HLeaf {
+pub struct HLeaf {
     #[state]
     value: i32,
     #[state]

@@ -97,10 +97,10 @@ fn drain(
         let s = fut.stream();
         tokio::pin!(s);
         while let Some(step) = s.next().await {
-            if let Step::Progress(f) = step {
-                if tx.send(f).is_err() {
-                    break;
-                }
+            if let Step::Progress(f) = step
+                && tx.send(f).is_err()
+            {
+                break;
             }
         }
     });

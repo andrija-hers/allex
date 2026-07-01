@@ -48,7 +48,9 @@ where
     pub fn new(shard_count: usize, capacity: usize) -> Self {
         let shard_count = shard_count.max(1);
         Self {
-            shards: (0..shard_count).map(|_| Mutex::new(HashMap::new())).collect(),
+            shards: (0..shard_count)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
             capacity: capacity.max(1),
         }
     }
@@ -76,10 +78,10 @@ where
     /// no receivers left, the send fails and the dead entry is reaped in place.
     pub fn publish(&self, key: &K, event: E) {
         let mut map = self.shard(key).lock().unwrap();
-        if let Some(tx) = map.get(key) {
-            if tx.send(event).is_err() {
-                map.remove(key);
-            }
+        if let Some(tx) = map.get(key)
+            && tx.send(event).is_err()
+        {
+            map.remove(key);
         }
     }
 
@@ -88,10 +90,10 @@ where
     /// holds the same lock) can't have its fresh entry reaped.
     pub fn release(&self, key: &K) {
         let mut map = self.shard(key).lock().unwrap();
-        if let Some(tx) = map.get(key) {
-            if tx.receiver_count() == 0 {
-                map.remove(key);
-            }
+        if let Some(tx) = map.get(key)
+            && tx.receiver_count() == 0
+        {
+            map.remove(key);
         }
     }
 
