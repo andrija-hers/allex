@@ -24,4 +24,5 @@ members = [
     "serve",
     "keyed-events",
     "guards",
+    "winsvc",
 ]

@@ -1,0 +1,14 @@
+[package]
+name = "allex-winsvc"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "allex_winsvc"
+path = "./lib.rs"
+
+# A thin, reusable Windows-service host harness. Windows-only; the crate is empty elsewhere so it can
+# sit in a cross-platform workspace and be depended on unconditionally.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+tokio = { version = "1", features = ["sync"] }
