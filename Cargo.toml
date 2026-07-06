@@ -16,6 +16,7 @@ members = [
     "examples/arithmetic_client",
     "examples/arithmetic_server",
     "watch-singleton",
+    "awaitable-map",
     "examples/arithmetic_tests",
     "state",
     "state-macro",

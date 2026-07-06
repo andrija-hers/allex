@@ -24,6 +24,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-awaitable-map"
+version = "0.1.0"
+dependencies = [
+ "allex-progressable-future",
+ "chrono",
+ "futures",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "allex-dart-codegen"
 version = "0.1.0"
 dependencies = [
