@@ -75,6 +75,10 @@ pub struct FieldInfo {
     /// True when the Rust type is `Option<T>`.
     pub is_optional: bool,
     pub skip: bool,
+    /// `#[serde(flatten)]`: the field has no JSON key of its own. A flattened
+    /// struct reads/writes its fields at the parent's level; a flattened map
+    /// captures every key not consumed by the parent's named fields.
+    pub flatten: bool,
 }
 
 pub struct EnumInfo {
@@ -128,6 +132,8 @@ enum DartType {
     Bool,
     DartString,
     Never,
+    /// `serde_json::Value` — an arbitrary JSON value, `dynamic` in Dart.
+    Json,
     Nullable(Box<DartType>),
     List(Box<DartType>),
     Map(Box<DartType>, Box<DartType>),
@@ -147,6 +153,7 @@ impl DartType {
             DartType::Map(k, v) => format!("Map<{}, {}>", k.type_str(), v.type_str()),
             DartType::Custom(name) => name.clone(),
             DartType::Never => "Never".into(),
+            DartType::Json => "dynamic".into(),
             DartType::Unknown(name) => format!("dynamic /* {name} */"),
         }
     }
@@ -178,7 +185,7 @@ impl DartType {
             }
             DartType::Custom(name) => format!("{name}.fromJson({src})"),
             DartType::Never => "throw UnimplementedError('unreachable: Never')".to_string(),
-            DartType::Unknown(_) => src.to_string(),
+            DartType::Json | DartType::Unknown(_) => src.to_string(),
         }
     }
 
@@ -216,7 +223,7 @@ impl DartType {
             }
             DartType::Never => "throw UnimplementedError('unreachable: Never')".to_string(),
             DartType::Custom(_) => format!("{val}.toJson()"),
-            DartType::Unknown(_) => val.to_string(),
+            DartType::Json | DartType::Unknown(_) => val.to_string(),
         }
     }
 
@@ -237,6 +244,7 @@ struct SerdeAttrs {
     has_default: bool,
     tag: Option<String>,
     untagged: bool,
+    flatten: bool,
 }
 
 fn parse_serde_attrs(attrs: &[Attribute]) -> SerdeAttrs {
@@ -267,6 +275,8 @@ fn parse_serde_attrs(attrs: &[Attribute]) -> SerdeAttrs {
                 out.has_default = true;
             } else if meta.path.is_ident("untagged") {
                 out.untagged = true;
+            } else if meta.path.is_ident("flatten") {
+                out.flatten = true;
             } else {
                 // Unknown serde attr — consume any `= <expr>` to avoid parse errors.
                 if meta.input.peek(syn::Token![=]) {
@@ -834,11 +844,31 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
             dart_type: "dynamic".into(),
             is_optional: false,
             skip: true,
+            flatten: false,
         });
     }
 
     let dart_ty = rust_type_to_dart(&field.ty);
     let is_optional = dart_ty.is_nullable();
+
+    if serde.flatten {
+        // Mirror what we can actually render faithfully; fail loudly on the
+        // rest rather than emit a wrong wire shape.
+        if is_optional {
+            panic!(
+                "#[serde(flatten)] on Option field `{rust_name}` is not supported by dart-codegen"
+            );
+        }
+        match &dart_ty {
+            DartType::Map(..) | DartType::Custom(_) => {}
+            other => panic!(
+                "#[serde(flatten)] on field `{rust_name}`: only struct or map fields are \
+                 supported, got `{}`",
+                other.type_str()
+            ),
+        }
+    }
+
     let json_name = serde
         .rename
         .clone()
@@ -851,6 +881,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
         dart_type: dart_ty.type_str(),
         is_optional,
         skip: false,
+        flatten: serde.flatten,
     })
 }
 
@@ -907,11 +938,18 @@ fn extract_variant(
             }
         }
         Fields::Named(named) => {
-            let fields = named
+            let fields: Vec<FieldInfo> = named
                 .named
                 .iter()
                 .filter_map(|f| extract_field(f, None))
                 .collect();
+            if let Some(f) = fields.iter().find(|f| f.flatten) {
+                panic!(
+                    "#[serde(flatten)] inside enum variants is not supported by dart-codegen \
+                     (variant `{parent_name}::{rust_name}`, field `{}`)",
+                    f.dart_name
+                );
+            }
             VariantKind::Struct { fields }
         }
         _ => {
@@ -1030,8 +1068,11 @@ fn render_struct(s: &StructInfo) -> String {
         lines.push(format!("    return {}(", s.name));
         for f in &active {
             let dart_ty = restore_dart_type(&f.dart_type);
-            let raw = format!("map['{}']", f.json_name);
-            let decoded = dart_ty.decode(&raw);
+            let decoded = if f.flatten {
+                flatten_decode_expr(&dart_ty, &active)
+            } else {
+                dart_ty.decode(&format!("map['{}']", f.json_name))
+            };
             lines.push(format!("      {}: {decoded},", f.dart_name));
         }
         lines.push("    );".into());
@@ -1044,12 +1085,60 @@ fn render_struct(s: &StructInfo) -> String {
     for f in &active {
         let dart_ty = restore_dart_type(&f.dart_type);
         let encoded = dart_ty.encode(&f.dart_name);
-        lines.push(format!("    '{}': {encoded},", f.json_name));
+        if f.flatten {
+            // A flattened field writes its entries at this level.
+            lines.push(format!("    ...{encoded},"));
+        } else {
+            lines.push(format!("    '{}': {encoded},", f.json_name));
+        }
     }
     lines.push("  };".into());
     lines.push("}".into());
 
     lines.join("\n")
+}
+
+/// Decode expression for a `#[serde(flatten)]` field.
+///
+/// Mirrors serde: the parent's named fields are consumed first, and the
+/// flattened field only sees the *rest* of the map. That matters when the
+/// flattened struct itself contains a flattened map — it must not capture the
+/// parent's own keys. A flattened map field likewise captures exactly the
+/// unconsumed keys.
+fn flatten_decode_expr(dart_ty: &DartType, active: &[&FieldInfo]) -> String {
+    let known: Vec<String> = active
+        .iter()
+        .filter(|f| !f.flatten)
+        .map(|f| format!("'{}'", f.json_name))
+        .collect();
+    let remainder = if known.is_empty() {
+        "Map<String, dynamic>.from(map)".to_string()
+    } else {
+        format!(
+            "(Map<String, dynamic>.from(map)..removeWhere((_k, _v) => \
+             const <String>{{{}}}.contains(_k)))",
+            known.join(", ")
+        )
+    };
+    match dart_ty {
+        DartType::Custom(name) => {
+            if known.is_empty() {
+                format!("{name}.fromJson(map)")
+            } else {
+                format!("{name}.fromJson({remainder})")
+            }
+        }
+        DartType::Map(_, val) => {
+            let val_dec = val.decode("_v");
+            if val_dec == "_v" {
+                remainder
+            } else {
+                format!("{remainder}.map((_k, _v) => MapEntry(_k, {val_dec}))")
+            }
+        }
+        // extract_field already rejects everything else.
+        other => unreachable!("flatten on unsupported type `{}`", other.type_str()),
+    }
 }
 
 fn render_enum(e: &EnumInfo) -> String {
@@ -1353,6 +1442,9 @@ fn rust_type_to_dart(ty: &Type) -> DartType {
                 "bool" => DartType::Bool,
                 "String" | "str" => DartType::DartString,
                 "Infallible" | "Never" => DartType::Never,
+                // serde_json::Value (and the common `JsonValue` alias): any
+                // JSON value — passes through untyped on the Dart side.
+                "Value" | "JsonValue" => DartType::Json,
                 "Option" => {
                     if let PathArguments::AngleBracketed(args) = &seg.arguments
                         && let Some(GenericArgument::Type(inner)) = args.args.first()
@@ -1950,6 +2042,153 @@ mod tests {
         assert_eq!(
             apply_rename_all("Initial", Some("PascalCase"), Variant),
             "Initial"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #[serde(flatten)] + serde_json::Value
+    // -----------------------------------------------------------------------
+
+    const FLATTEN_MAP_STRUCT: &str = r#"
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub struct TemplateField {
+            pub name: String,
+            #[serde(flatten)]
+            pub extra: std::collections::HashMap<String, serde_json::Value>,
+        }
+    "#;
+
+    const FLATTEN_STRUCT_STRUCT: &str = r#"
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Envelope {
+            pub kind: String,
+            #[serde(flatten)]
+            pub meta: Metadata,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Metadata {
+            pub created_at: String,
+        }
+    "#;
+
+    #[test]
+    fn parses_flatten_field() {
+        let dtos = find_dto_types(FLATTEN_MAP_STRUCT);
+        let DtoInfo::Struct(s) = &dtos[0] else {
+            panic!("expected struct");
+        };
+        assert!(!s.fields[0].flatten);
+        assert!(s.fields[1].flatten);
+        assert_eq!(s.fields[1].dart_type, "Map<String, dynamic>");
+    }
+
+    #[test]
+    fn renders_flattened_map_as_remainder_capture_and_spread() {
+        let dtos = find_dto_types(FLATTEN_MAP_STRUCT);
+        let dart = render_dart_dtos("demo", &dtos, &[]);
+        // Field is an ordinary Dart member.
+        assert!(dart.contains("final Map<String, dynamic> extra;"));
+        // fromJson captures every key the named fields did not consume.
+        assert!(dart.contains(
+            "extra: (Map<String, dynamic>.from(map)..removeWhere((_k, _v) => \
+             const <String>{'name'}.contains(_k)))"
+        ));
+        // toJson spreads the entries back at the parent level — no 'extra' key.
+        assert!(dart.contains("...extra,"));
+        assert!(!dart.contains("'extra':"));
+    }
+
+    #[test]
+    fn renders_flattened_struct_from_parent_map_and_spread() {
+        let dtos = find_dto_types(FLATTEN_STRUCT_STRUCT);
+        let dart = render_dart_dtos("demo", &dtos, &[]);
+        // fromJson builds the nested struct from the parent's map minus the
+        // parent's own keys (serde consumes named fields first).
+        assert!(dart.contains(
+            "meta: Metadata.fromJson((Map<String, dynamic>.from(map)..removeWhere((_k, _v) => \
+             const <String>{'kind'}.contains(_k)))),"
+        ));
+        // toJson spreads the nested struct's entries — no 'meta' key.
+        assert!(dart.contains("...meta.toJson(),"));
+        assert!(!dart.contains("'meta':"));
+    }
+
+    #[test]
+    fn flattened_map_known_keys_use_wire_names() {
+        let src = r#"
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            pub struct Renamed {
+                pub field_one: String,
+                #[serde(rename = "two")]
+                pub field_two: String,
+                #[serde(flatten)]
+                pub rest: std::collections::HashMap<String, serde_json::Value>,
+            }
+        "#;
+        let dtos = find_dto_types(src);
+        let dart = render_dart_dtos("demo", &dtos, &[]);
+        // The remainder must exclude the *serialized* names.
+        assert!(dart.contains("const <String>{'fieldOne', 'two'}.contains(_k)"));
+    }
+
+    #[test]
+    fn maps_serde_json_value_to_dynamic() {
+        let src = r#"
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize)]
+            pub struct WithValue {
+                pub payload: serde_json::Value,
+                pub options: std::collections::HashMap<String, JsonValue>,
+            }
+        "#;
+        let dtos = find_dto_types(src);
+        let dart = render_dart_dtos("demo", &dtos, &[]);
+        assert!(dart.contains("final dynamic payload;"));
+        assert!(dart.contains("final Map<String, dynamic> options;"));
+        assert!(dart.contains("payload: map['payload'],"));
+        assert!(dart.contains("'payload': payload,"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Option field")]
+    fn rejects_flatten_on_option() {
+        find_dto_types(
+            r#"
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize)]
+            pub struct Bad {
+                #[serde(flatten)]
+                pub meta: Option<Metadata>,
+            }
+        "#,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "inside enum variants")]
+    fn rejects_flatten_in_enum_variant() {
+        find_dto_types(
+            r#"
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize)]
+            pub enum Bad {
+                Case {
+                    #[serde(flatten)]
+                    extra: std::collections::HashMap<String, serde_json::Value>,
+                },
+            }
+        "#,
         );
     }
 }
