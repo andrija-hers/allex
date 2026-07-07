@@ -26,4 +26,5 @@ members = [
     "keyed-events",
     "guards",
     "winsvc",
+    "script",
 ]

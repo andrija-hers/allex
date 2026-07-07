@@ -1,0 +1,9 @@
+[package]
+name = "allex-script"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Run an external script or executable: args + env in, captured output out, non-zero exit mapped to a typed error. Cross-platform and shell-agnostic."
+
+[dependencies]
+thiserror = "2"
