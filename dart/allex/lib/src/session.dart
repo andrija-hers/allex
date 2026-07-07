@@ -47,6 +47,11 @@ class AllexPasswordSession {
 
   String? _token;
   String? _refreshToken;
+  String? _role;
+
+  /// The authenticated caller's role (e.g. `admin` / `user`), learned from the
+  /// login/refresh response. `null` until the first successful authentication.
+  String? get role => _role;
 
   String get _root {
     final s = baseUri.toString();
@@ -138,6 +143,10 @@ class AllexPasswordSession {
     final refresh = body['refresh_token'] as String?;
     if (refresh != null && refresh.isNotEmpty) {
       _refreshToken = refresh;
+    }
+    final role = body['role'] as String?;
+    if (role != null && role.isNotEmpty) {
+      _role = role;
     }
   }
 

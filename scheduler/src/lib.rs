@@ -174,6 +174,24 @@ where
         self.schedules.remove(schedule_id)
     }
 
+    /// Replaces every schedule belonging to `source_id` — i.e. whose id has the
+    /// `"{source_id}::"` prefix — with `replacements`, in one step. Used to
+    /// hot-reload a single source (e.g. one edited schedule file) without
+    /// disturbing other sources: stale entries for the source are dropped and
+    /// the fresh set inserted. The `::` delimiter in the id keeps `"alice"` from
+    /// matching `"alice2"`.
+    pub fn replace_source_schedules(
+        &mut self,
+        source_id: &str,
+        replacements: impl IntoIterator<Item = (String, T)>,
+    ) {
+        let prefix = format!("{source_id}::");
+        self.schedules.retain(|id, _| !id.starts_with(&prefix));
+        for (schedule_id, schedule) in replacements {
+            self.schedules.insert(schedule_id, schedule);
+        }
+    }
+
     pub fn schedule(&self, schedule_id: &str) -> Option<&T> {
         self.schedules.get(schedule_id)
     }
