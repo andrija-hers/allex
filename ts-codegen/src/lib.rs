@@ -347,7 +347,19 @@ pub fn find_dto_types(source: &str) -> Vec<DtoInfo> {
 
 /// The reachable subset of DTOs starting from `roots`, following field types transitively.
 pub fn find_reachable_dtos(source: &str, roots: &[&str]) -> Vec<DtoInfo> {
-    let all = find_dto_types(source);
+    reachable_dtos(find_dto_types(source), roots)
+}
+
+/// The reachable subset of an already-collected DTO set starting from `roots`, following field
+/// types transitively. Use this when the DTOs come from several source files (each parsed
+/// independently — a plain text concatenation of Rust files is not itself valid Rust, e.g. a
+/// second file's `//!` inner-doc header would land mid-stream). Duplicate definitions (same name)
+/// are collapsed to the first.
+pub fn reachable_dtos(all: Vec<DtoInfo>, roots: &[&str]) -> Vec<DtoInfo> {
+    let mut all = all;
+    let mut seen_names: HashSet<String> = HashSet::new();
+    all.retain(|d| seen_names.insert(d.name().to_string()));
+
     let index: std::collections::HashMap<&str, usize> =
         all.iter().enumerate().map(|(i, d)| (d.name(), i)).collect();
 

@@ -1,7 +1,8 @@
 use std::{env, fs, path::PathBuf, process};
 
 use allex_ts_codegen::{
-    find_reachable_dtos, find_rpc_modules, referenced_type_names, render_client, render_dtos,
+    DtoInfo, RpcModuleInfo, find_dto_types, find_rpc_modules, reachable_dtos,
+    referenced_type_names, render_client, render_dtos,
 };
 
 const USAGE: &str = "usage: cargo run -p allex-ts-codegen -- --source <rust-file> [--source ...] \
@@ -17,16 +18,18 @@ fn main() {
 fn run(args: Vec<String>) -> Result<(), String> {
     let cfg = parse_args(args)?;
 
-    let mut source = String::new();
+    // Parse each source file independently and merge the results. A plain text concatenation of
+    // Rust files is not valid Rust — a second file's `//!` inner-doc header (or any `#![…]` crate
+    // attribute) is only legal at the very start of a file, so it would fail to parse mid-stream.
+    let mut modules: Vec<RpcModuleInfo> = Vec::new();
+    let mut all_dtos: Vec<DtoInfo> = Vec::new();
     for path in &cfg.sources {
-        source.push_str(
-            &fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {e}", path.display()))?,
-        );
-        source.push('\n');
+        let source = fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        modules.extend(find_rpc_modules(&source));
+        all_dtos.extend(find_dto_types(&source));
     }
 
-    let modules = find_rpc_modules(&source);
     if modules.is_empty() {
         return Err("no #[rpc_module] traits found in the given source(s)".to_string());
     }
@@ -34,7 +37,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     fs::create_dir_all(&cfg.out_dir)
         .map_err(|e| format!("failed to create {}: {e}", cfg.out_dir.display()))?;
 
-    // Shared dtos.ts: the union of every DTO reachable from any module's methods.
+    // Shared dtos.ts: the union of every DTO reachable from any module's methods, across all files.
     let mut roots: Vec<String> = Vec::new();
     for m in &modules {
         roots.extend(referenced_type_names(m));
@@ -42,7 +45,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     roots.sort();
     roots.dedup();
     let root_refs: Vec<&str> = roots.iter().map(String::as_str).collect();
-    let dtos = find_reachable_dtos(&source, &root_refs);
+    let dtos = reachable_dtos(all_dtos, &root_refs);
 
     const DTOS_FILE: &str = "dtos.ts";
     let dtos_import = "./dtos.ts";
