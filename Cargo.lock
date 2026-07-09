@@ -250,6 +250,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-ts-codegen"
+version = "0.1.0"
+dependencies = [
+ "syn",
+]
+
+[[package]]
 name = "allex-watch-singleton"
 version = "0.1.0"
 dependencies = [

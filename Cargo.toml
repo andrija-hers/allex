@@ -21,6 +21,7 @@ members = [
     "state",
     "state-macro",
     "dart-codegen",
+    "ts-codegen",
     "scheduler",
     "serve",
     "keyed-events",
