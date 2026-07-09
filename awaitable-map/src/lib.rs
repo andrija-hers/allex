@@ -1359,7 +1359,9 @@ mod tests {
         assert_eq!(map.count_cached(&keys).expect("count"), 1);
 
         // Re-querying re-fetches only the evicted key.
-        map.query(&keys).await.expect("second query re-fetches apple");
+        map.query(&keys)
+            .await
+            .expect("second query re-fetches apple");
         assert_eq!(map.fetcher.fetch_count.get(), 2);
         assert_eq!(map.count_cached(&keys).expect("count"), 2);
     }
