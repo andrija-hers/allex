@@ -637,7 +637,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
     let json_name = serde
         .rename
         .clone()
-        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all));
+        .unwrap_or_else(|| apply_rename_all(&rust_name, rename_all, RenameTarget::Field));
     let ts = rust_type_to_ts(&field.ty);
     Some(FieldInfo {
         ts_name: snake_to_camel(&rust_name),
@@ -674,9 +674,13 @@ fn extract_variant(variant: &syn::Variant, rename_all: Option<&str>) -> Option<V
     if serde.skip {
         return None;
     }
-    let json_name = serde
-        .rename
-        .unwrap_or_else(|| apply_rename_all(&variant.ident.to_string(), rename_all));
+    let json_name = serde.rename.unwrap_or_else(|| {
+        apply_rename_all(
+            &variant.ident.to_string(),
+            rename_all,
+            RenameTarget::Variant,
+        )
+    });
     let kind = match &variant.fields {
         Fields::Unit => VariantKind::Unit,
         Fields::Unnamed(u) if u.unnamed.len() == 1 => {
@@ -1187,21 +1191,183 @@ fn snake_to_camel(s: &str) -> String {
     out
 }
 
-fn apply_rename_all(name: &str, rename_all: Option<&str>) -> String {
-    match rename_all {
-        Some("camelCase") => snake_to_camel(name),
-        Some("snake_case") | None => name.to_string(),
-        Some("PascalCase") => {
-            let camel = snake_to_camel(name);
-            let mut c = camel.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().chain(c).collect(),
-                None => camel,
-            }
-        }
-        Some("SCREAMING_SNAKE_CASE") => name.to_uppercase(),
-        Some("kebab-case") => name.replace('_', "-"),
+/// Which serde rename context a `rename_all` rule is applied in.
+///
+/// serde uses *different* transforms for the two, because the conventional Rust
+/// casings differ: struct fields are `snake_case`, enum variants are
+/// `PascalCase`. So `rename_all = "snake_case"` is a no-op on a field but maps
+/// `Initial` → `initial` on a variant (and `camelCase` lowercases a variant's
+/// first letter but capitalizes word boundaries in a field).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameTarget {
+    Field,
+    Variant,
+}
+
+/// Apply a serde `rename_all` rule to a Rust identifier, mirroring serde's
+/// `RenameRule::apply_to_field` / `apply_to_variant`.
+fn apply_rename_all(name: &str, rule: Option<&str>, target: RenameTarget) -> String {
+    let rule = match rule {
+        None | Some("none") => return name.to_string(),
+        Some(rule) => rule,
+    };
+    match target {
+        RenameTarget::Field => apply_rename_all_field(name, rule),
+        RenameTarget::Variant => apply_rename_all_variant(name, rule),
+    }
+}
+
+/// serde `RenameRule::apply_to_field` — the input is a `snake_case` field name.
+fn apply_rename_all_field(field: &str, rule: &str) -> String {
+    match rule {
+        // A field is already snake/lowercase, so these are no-ops.
+        "lowercase" | "snake_case" => field.to_string(),
+        "camelCase" => snake_to_camel(field),
+        "PascalCase" => capitalize_first(&snake_to_camel(field)),
+        "SCREAMING_SNAKE_CASE" => field.to_ascii_uppercase(),
+        "kebab-case" => field.replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => field.to_ascii_uppercase().replace('_', "-"),
         // Unknown convention: leave as-is.
-        Some(_) => name.to_string(),
+        _ => field.to_string(),
+    }
+}
+
+/// serde `RenameRule::apply_to_variant` — the input is a `PascalCase` variant.
+fn apply_rename_all_variant(variant: &str, rule: &str) -> String {
+    match rule {
+        // A variant is already PascalCase, so this is a no-op.
+        "PascalCase" => variant.to_string(),
+        "lowercase" => variant.to_ascii_lowercase(),
+        "camelCase" => lowercase_first(variant),
+        "snake_case" => pascal_to_snake(variant),
+        "SCREAMING_SNAKE_CASE" => pascal_to_snake(variant).to_ascii_uppercase(),
+        "kebab-case" => pascal_to_snake(variant).replace('_', "-"),
+        "SCREAMING-KEBAB-CASE" => pascal_to_snake(variant)
+            .to_ascii_uppercase()
+            .replace('_', "-"),
+        // Unknown convention: leave as-is.
+        _ => variant.to_string(),
+    }
+}
+
+/// `PascalCase` → `snake_case` (serde's variant `SnakeCase` rule: lowercase and
+/// insert `_` before each interior uppercase letter).
+fn pascal_to_snake(variant: &str) -> String {
+    let mut snake = String::new();
+    for (i, ch) in variant.char_indices() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            snake.push('_');
+        }
+        snake.push(ch.to_ascii_lowercase());
+    }
+    snake
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use RenameTarget::{Field, Variant};
+
+    #[test]
+    fn apply_rename_all_cases() {
+        // Fields are snake_case in Rust: snake_case/lowercase are no-ops.
+        assert_eq!(
+            apply_rename_all("hello_world", Some("camelCase"), Field),
+            "helloWorld"
+        );
+        assert_eq!(
+            apply_rename_all("hello_world", Some("PascalCase"), Field),
+            "HelloWorld"
+        );
+        assert_eq!(
+            apply_rename_all("hello_world", Some("SCREAMING_SNAKE_CASE"), Field),
+            "HELLO_WORLD"
+        );
+        assert_eq!(
+            apply_rename_all("hello_world", Some("kebab-case"), Field),
+            "hello-world"
+        );
+        assert_eq!(
+            apply_rename_all("hello_world", Some("snake_case"), Field),
+            "hello_world"
+        );
+        assert_eq!(apply_rename_all("hello_world", None, Field), "hello_world");
+
+        // Variants are PascalCase in Rust. Before this fix, snake_case/kebab/etc were
+        // emitted verbatim (the wire mismatch this closes).
+        assert_eq!(
+            apply_rename_all("Initial", Some("snake_case"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("snake_case"), Variant),
+            "on_data_pricing"
+        );
+        assert_eq!(
+            apply_rename_all("Initial", Some("camelCase"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("camelCase"), Variant),
+            "onDataPricing"
+        );
+        assert_eq!(
+            apply_rename_all("Initial", Some("lowercase"), Variant),
+            "initial"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("SCREAMING_SNAKE_CASE"), Variant),
+            "ON_DATA_PRICING"
+        );
+        assert_eq!(
+            apply_rename_all("OnDataPricing", Some("kebab-case"), Variant),
+            "on-data-pricing"
+        );
+        assert_eq!(apply_rename_all("Initial", None, Variant), "Initial");
+        assert_eq!(
+            apply_rename_all("Initial", Some("PascalCase"), Variant),
+            "Initial"
+        );
+    }
+
+    #[test]
+    fn enum_variant_rename_all_reaches_the_wire() {
+        // End to end: a `rename_all = "snake_case"` unit enum must emit snake_case
+        // TS union members and matching decode/encode arms.
+        let src = r#"
+            #[derive(Serialize, Deserialize)]
+            #[serde(rename_all = "snake_case")]
+            pub enum MatchMode { StartsWith, EndsWith, Contains }
+        "#;
+        let dtos = find_dto_types(src);
+        let out = render_dtos(&dtos);
+        assert!(
+            out.contains("\"starts_with\""),
+            "union should carry snake_case variant: {out}"
+        );
+        assert!(
+            out.contains("\"ends_with\""),
+            "union should carry snake_case variant: {out}"
+        );
+        assert!(
+            !out.contains("\"StartsWith\""),
+            "PascalCase must not leak to the wire: {out}"
+        );
     }
 }
