@@ -32,22 +32,39 @@ pub struct CallerContext {
     pub handle: Option<String>,
     /// The caller's role, if any.
     pub role: Option<String>,
+    /// An optional opaque, project-defined profile payload: the third
+    /// `\x1e`-separated segment of the bearer-validated caller string (e.g. a
+    /// JSON blob of per-user rights flags a store baked into the token and
+    /// re-emitted from `validate_bearer`). `None` for the classic two-segment
+    /// `handle\x1erole` encoding, so this is fully backward compatible. Decode
+    /// it into your own type via [`caller_profile`]; allex treats it as bytes.
+    pub profile: Option<String>,
 }
 
 impl CallerContext {
-    /// Parses the `handle\x1erole` string allex identity stores encode into the
-    /// bearer-validated caller field (see `PostgresIdentityStore::validate_bearer`).
+    /// Parses the `handle\x1erole[\x1eprofile]` string allex identity stores
+    /// encode into the bearer-validated caller field (see
+    /// `PostgresIdentityStore::validate_bearer`). The optional third segment is
+    /// an opaque, project-defined profile (see [`CallerContext::profile`]).
     pub fn parse(encoded: Option<&str>) -> Self {
         match encoded {
             None => Self::default(),
             Some(s) => {
-                let mut parts = s.split('\u{1e}');
+                // `splitn(3)` so the opaque profile segment may itself contain
+                // `\x1e` (e.g. arbitrary JSON) without being truncated, while
+                // handle/role extraction is unchanged from the two-segment form.
+                let mut parts = s.splitn(3, '\u{1e}');
                 let handle = parts.next().filter(|p| !p.is_empty()).map(str::to_owned);
                 let role = parts
                     .next()
                     .map(str::to_owned)
                     .or_else(|| Some(s.to_owned()));
-                Self { handle, role }
+                let profile = parts.next().filter(|p| !p.is_empty()).map(str::to_owned);
+                Self {
+                    handle,
+                    role,
+                    profile,
+                }
             }
         }
     }
@@ -66,6 +83,16 @@ pub fn caller_handle() -> Option<String> {
 /// Returns the authenticated caller's role for the current request, if any.
 pub fn caller_role() -> Option<String> {
     CALLER.try_with(|c| c.role.clone()).ok().flatten()
+}
+
+/// Returns the authenticated caller's opaque profile segment for the current
+/// request, if the store attached one (see [`CallerContext::profile`]).
+///
+/// This is the project-defined third segment of the bearer-validated caller
+/// string; allex carries it verbatim. Decode it into your own type, e.g.
+/// `caller_profile().and_then(|p| serde_json::from_str::<MyRights>(&p).ok())`.
+pub fn caller_profile() -> Option<String> {
+    CALLER.try_with(|c| c.profile.clone()).ok().flatten()
 }
 
 /// Drains `transport`'s incoming requests and dispatches each through `registry`,
@@ -147,5 +174,58 @@ where
         Err(error) => {
             let _ = item.respond_with_transport_error(error).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CallerContext;
+
+    const RS: char = '\u{1e}';
+
+    #[test]
+    fn parse_none_is_default() {
+        let c = CallerContext::parse(None);
+        assert_eq!(c.handle, None);
+        assert_eq!(c.role, None);
+        assert_eq!(c.profile, None);
+    }
+
+    #[test]
+    fn parse_classic_two_segment_unchanged() {
+        // The historical `handle\x1erole` encoding must parse exactly as before,
+        // with no profile — this is the epicfix-compatibility guarantee.
+        let c = CallerContext::parse(Some(&format!("alice{RS}operator")));
+        assert_eq!(c.handle.as_deref(), Some("alice"));
+        assert_eq!(c.role.as_deref(), Some("operator"));
+        assert_eq!(c.profile, None);
+    }
+
+    #[test]
+    fn parse_third_segment_becomes_profile() {
+        let c = CallerContext::parse(Some(&format!("alice{RS}user{RS}{{\"r_admin\":true}}")));
+        assert_eq!(c.handle.as_deref(), Some("alice"));
+        assert_eq!(c.role.as_deref(), Some("user"));
+        assert_eq!(c.profile.as_deref(), Some("{\"r_admin\":true}"));
+    }
+
+    #[test]
+    fn parse_profile_may_contain_record_separator() {
+        // splitn(3) keeps everything after the second separator in the profile,
+        // so an opaque payload containing `\x1e` survives intact.
+        let profile = format!("a{RS}b");
+        let c = CallerContext::parse(Some(&format!("alice{RS}user{RS}{profile}")));
+        assert_eq!(c.role.as_deref(), Some("user"));
+        assert_eq!(c.profile.as_deref(), Some(profile.as_str()));
+    }
+
+    #[test]
+    fn parse_bare_string_keeps_legacy_role_fallback() {
+        // A single segment with no separator preserves the pre-existing quirk:
+        // handle and role both resolve to the whole string, profile stays None.
+        let c = CallerContext::parse(Some("operator"));
+        assert_eq!(c.handle.as_deref(), Some("operator"));
+        assert_eq!(c.role.as_deref(), Some("operator"));
+        assert_eq!(c.profile, None);
     }
 }

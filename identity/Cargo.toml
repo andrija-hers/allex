@@ -14,6 +14,7 @@ futures = "0.3"
 async-trait = "0.1"
 jsonwebtoken = "9"
 bcrypt = "0.15"
+uuid = { version = "1", features = ["v4"] }
 message_templates = { path = "../message-templates", package = "allex-message-templates" }
 transport = { path = "../transport", package = "allex-transport" }
 rpc-macro = { path = "../rpc-macro", package = "allex-rpc-macros" }

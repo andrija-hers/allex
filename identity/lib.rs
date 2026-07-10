@@ -7,6 +7,12 @@ mod types;
 pub use types::*;
 mod store;
 pub use store::*;
+/// Reusable JWT engine (issue/validate access & refresh tokens, optional opaque
+/// per-user profile claims). Previously an orphan file; wired in so custom
+/// stores can share it instead of each re-deriving JWT plumbing.
+pub mod tokens;
+mod credential_store;
+pub use credential_store::*;
 
 use rpc_macro::rpc_module;
 
@@ -46,4 +52,59 @@ pub trait IdentityV1 {
         &self,
         req: LogoutRequest,
     ) -> impl std::future::Future<Output = Result<LogoutResponse, IdentityError>> + Send;
+}
+
+/// Idempotently ensures a user exists by registering `(handle, password, role)`
+/// and treating [`IdentityError::HandleAlreadyTaken`] as success.
+///
+/// Use it to seed a service's initial operator account on startup without
+/// clobbering an already-seeded one — the pattern every allex host otherwise
+/// hand-writes around [`IdentityV1::register`].
+pub async fn ensure_user<I>(
+    identity: &I,
+    handle: impl Into<String>,
+    password: impl Into<String>,
+    role: impl Into<String>,
+) -> Result<(), IdentityError>
+where
+    I: IdentityV1,
+{
+    match identity
+        .register(RegisterRequest {
+            handle: handle.into(),
+            password: password.into(),
+            role: role.into(),
+        })
+        .await
+    {
+        Ok(_) | Err(IdentityError::HandleAlreadyTaken) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod ensure_user_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_user_is_idempotent() {
+        let store = InMemoryIdentityStore::new("secret");
+        // First call registers, second call must not error on the duplicate.
+        ensure_user(&store, "operator", "pw", "operator")
+            .await
+            .unwrap();
+        ensure_user(&store, "operator", "pw", "operator")
+            .await
+            .unwrap();
+        // The seeded account logs in.
+        assert!(
+            store
+                .login(LoginRequest {
+                    handle: "operator".into(),
+                    password: "pw".into(),
+                })
+                .await
+                .is_ok()
+        );
+    }
 }
