@@ -65,6 +65,109 @@ pub trait ProgressableAwaitableMapFetcher<K, V>: AwaitableMapFetcher<K, V> {
     ) -> ProgressableFuture<Self::Progress, Vec<(K, V)>, Self::Error>;
 }
 
+/// A fetcher combinator that guarantees a value for **every** requested key by
+/// filling any the inner fetcher omits with a caller-supplied placeholder.
+///
+/// [`DailyAwaitableMap`] requires the fetcher to return a value for every key,
+/// else the whole query fails with [`AwaitableMapError::MissingFetchedKeys`].
+/// That strictness is correct for a fetcher that *should* be total — a cache, a
+/// database — where a dropped key means corruption. But an adapter over a
+/// **partial** upstream (an external API that may silently omit records) needs
+/// to *totalize* the source rather than fail the entire batch for one missing
+/// record. Wrap such a fetcher so a single omission becomes a placeholder value
+/// instead of a total failure:
+///
+/// ```ignore
+/// let fetcher = TotalizingFetcher::new(upstream, |key| placeholder_for(key));
+/// ```
+///
+/// The placeholder is domain-specific — only the caller knows what an absent
+/// value should look like — while the generic map keeps its strict invariant
+/// intact for every other fetcher.
+pub struct TotalizingFetcher<F, P> {
+    inner: F,
+    placeholder: P,
+}
+
+impl<F, P> TotalizingFetcher<F, P> {
+    pub fn new(inner: F, placeholder: P) -> Self {
+        Self { inner, placeholder }
+    }
+}
+
+/// Append a placeholder entry for every requested key the fetch omitted, leaving
+/// the returned rows untouched. Result order is returned-rows-first, then the
+/// omissions in `keys` order.
+fn totalize_rows<K, V>(
+    mut rows: Vec<(K, V)>,
+    keys: &[K],
+    placeholder: &impl Fn(&K) -> V,
+) -> Vec<(K, V)>
+where
+    K: Clone + Eq + Hash,
+{
+    let present: HashSet<K> = rows.iter().map(|(key, _)| key.clone()).collect();
+    for key in keys {
+        if !present.contains(key) {
+            rows.push((key.clone(), placeholder(key)));
+        }
+    }
+    rows
+}
+
+impl<K, V, F, P> AwaitableMapFetcher<K, V> for TotalizingFetcher<F, P>
+where
+    F: AwaitableMapFetcher<K, V>,
+    P: Fn(&K) -> V,
+    K: Clone + Eq + Hash,
+{
+    type Error = F::Error;
+
+    async fn fetch_many(&self, keys: &[K]) -> Result<Vec<(K, V)>, Self::Error> {
+        let rows = self.inner.fetch_many(keys).await?;
+        Ok(totalize_rows(rows, keys, &self.placeholder))
+    }
+}
+
+impl<K, V, F, P> ProgressableAwaitableMapFetcher<K, V> for TotalizingFetcher<F, P>
+where
+    F: ProgressableAwaitableMapFetcher<K, V>,
+    F::Progress: Send + 'static,
+    F::Error: From<TransportIssue> + Send + 'static,
+    P: Fn(&K) -> V + Clone + Send + 'static,
+    K: Clone + Eq + Hash + Send + 'static,
+    V: Send + 'static,
+{
+    type Progress = F::Progress;
+
+    fn fetch_many_progressable(
+        &self,
+        keys: &[K],
+    ) -> ProgressableFuture<Self::Progress, Vec<(K, V)>, Self::Error> {
+        let inner = self.inner.fetch_many_progressable(keys);
+        let keys = keys.to_vec();
+        let placeholder = self.placeholder.clone();
+        ProgressableFuture::new(move |sender| async move {
+            let stream = inner.stream();
+            futures::pin_mut!(stream);
+            loop {
+                match stream.next().await {
+                    Some(Step::Progress(progress)) => sender.progress(progress),
+                    Some(Step::Success(rows)) => {
+                        break Ok(totalize_rows(rows, &keys, &placeholder));
+                    }
+                    Some(Step::Error(error)) => break Err(error),
+                    // Faithfully surface a transport failure / early stream end as
+                    // the inner fetcher's error; we never fabricate rows for a
+                    // batch that did not actually complete.
+                    Some(Step::Transport(issue)) => break Err(F::Error::from(issue)),
+                    None => break Err(F::Error::from(TransportIssue::Interrupted)),
+                }
+            }
+        })
+    }
+}
+
 pub struct AwaitableMap<K, V, P, F> {
     persistence: P,
     fetcher: F,
@@ -1278,6 +1381,37 @@ mod tests {
             .expect_err("query should fail when one key is still missing");
 
         assert!(matches!(error, AwaitableMapError::MissingFetchedKeys));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn totalizing_fetcher_fills_omitted_key_instead_of_failing_the_query() {
+        let apple = InstrumentDuplet::new("Ric", "AAPL.O");
+        let msft = InstrumentDuplet::new("Ric", "MSFT.O");
+        // Same omit_last inner fetcher that makes the bare query fail above.
+        let inner = MemoryFetcher {
+            responses: HashMap::from([
+                (apple.clone(), "fetched-apple".to_string()),
+                (msft.clone(), "fetched-msft".to_string()),
+            ]),
+            fetch_count: Cell::new(0),
+            omit_last: true,
+        };
+        let fetcher = TotalizingFetcher::new(inner, |key: &InstrumentDuplet| {
+            format!("stub:{}", key.instrument_code)
+        });
+
+        let map = AwaitableMap::new(MemoryPersistence::default(), fetcher);
+        let values = map
+            .query(&[apple, msft])
+            .await
+            .expect("totalizing the omitted key should let the query succeed");
+
+        // The returned key keeps its real value; the omitted one is filled with the
+        // placeholder — aligned with the requested-key order.
+        assert_eq!(
+            values,
+            vec!["fetched-apple".to_string(), "stub:MSFT.O".to_string()]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
