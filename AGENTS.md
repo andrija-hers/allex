@@ -75,7 +75,9 @@ top-level doc — read the crate-level `//!` comments for detail.
 - `host` (`allex-host`) — the `ServiceHost` builder: batteries-included axum host
   that owns the `Registry` + `AxumTransport` + `serve_dispatch` wiring (and its
   spawn footgun) and hands back an extensible `axum::Router`. **Start here for a new
-  backend.** See the crate `//!`.
+  backend.** Its `bootstrap` module owns the startup prologue every backend used to
+  copy-paste — JWT-secret load-or-create, TTL/env parsing, `.env` loading,
+  bind-address resolution (`Bootstrap` + free fns). See the crate `//!`.
 - `progressable-future` (`allex-progressable-future`) — the streaming-RPC future
   and step model. **Idea:** a future that emits `Progress(P)*` then one terminal
   `Success`/`Error`/`Transport` (`ProgressOutcome`); consume via `.stream()` /
@@ -206,7 +208,10 @@ Learned while building this; ignore at your peril.
    into an `allex_host::ServiceHost` (below). Don't hand-write the `Registry` +
    transport + `serve_dispatch` wiring — `host` owns it.
 3. **`*-svc-host` crate** — pick a persistent identity store (or a
-   `CredentialStore`), seed with `ensure_user`, build the router, serve.
+   `CredentialStore`), seed with `ensure_user`, build the router, serve. For the
+   `main.rs` prologue use `allex_host::bootstrap` (`Bootstrap::new(state_dir,
+   env_prefix)` → `.load_dotenv()` / `.load_jwt_secret()`, plus `load_jwt_ttl_secs`
+   / `resolve_bind_address` / `warn_ttl_overrides`) — don't hand-write a `config.rs`.
 4. **Dev server** — swap in `InMemoryIdentityStore` + a permissive CORS layer.
 5. **Read the caller** inside a method via `allex_serve::caller_handle()` /
    `caller_role()` / `caller_profile()`. Do not add a caller argument.

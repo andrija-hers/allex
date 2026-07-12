@@ -35,6 +35,14 @@
 //! [`map_router`](RpcService::map_router) / [`with_health`](RpcService::with_health) to extend the
 //! router and [`serve`](RpcService::serve) to run it — racing the HTTP server against the dispatch
 //! loop so if either ends, the process shuts down cleanly.
+//!
+//! # Startup boilerplate
+//!
+//! The [`bootstrap`] module owns the other copy-pasted prologue — JWT-secret loading (with a
+//! persisted dev fallback), TTL/env parsing, `.env` loading, and bind-address resolution — so a new
+//! `main.rs` reads as configuration, not boilerplate.
+
+pub mod bootstrap;
 
 use std::marker::PhantomData;
 use std::sync::Arc;

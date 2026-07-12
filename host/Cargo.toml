@@ -13,3 +13,5 @@ transport = { version = "0.1.0", path = "../transport", package = "allex-transpo
 serve = { version = "0.1.0", path = "../serve", package = "allex-serve" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt", "net", "macros"] }
+dotenvy = "0.15"
+uuid = { version = "1", features = ["v4"] }
