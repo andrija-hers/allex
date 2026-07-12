@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use transport::BearerTokenValidator;
 
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
-    RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
 };
 
 const FORGOT_PASSWORD_TEMPLATE_KEY: &str = "forgot_password";
@@ -500,5 +500,109 @@ impl BearerTokenValidator for PostgresIdentityStore {
         }
         self.decode_jwt(token)
             .map(|c| format!("{}\x1e{}", c.sub, c.role))
+    }
+}
+
+impl AccountStore for PostgresIdentityStore {
+    async fn verify_password(&self, handle: &str, password: &str) -> Result<bool, IdentityError> {
+        let client = self.db.get_client().await.map_err(db_err)?;
+        let row = client
+            .query_opt(
+                "SELECT password_hash FROM users WHERE handle = $1",
+                &[&handle],
+            )
+            .await
+            .map_err(db_err)?;
+        drop(client);
+
+        let Some(row) = row else {
+            return Ok(false); // unknown handle — do not leak existence
+        };
+        let password_hash: String = row.try_get("password_hash").map_err(db_err)?;
+
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || {
+            verify(password, &password_hash).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn set_password(&self, handle: &str, new_password: &str) -> Result<(), IdentityError> {
+        let new_password = new_password.to_owned();
+        let password_hash = tokio::task::spawn_blocking(move || {
+            hash(new_password, DEFAULT_COST).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        let affected = self
+            .db
+            .get_client()
+            .await
+            .map_err(db_err)?
+            .execute(
+                "UPDATE users SET password_hash = $1 WHERE handle = $2",
+                &[&password_hash, &handle],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Err(IdentityError::UserNotFound);
+        }
+        Ok(())
+    }
+
+    async fn get_account(&self, handle: &str) -> Result<Option<AccountRecord>, IdentityError> {
+        let client = self.db.get_client().await.map_err(db_err)?;
+        let row = client
+            .query_opt("SELECT role FROM users WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?;
+        match row {
+            Some(row) => {
+                let role: String = row.try_get("role").map_err(db_err)?;
+                Ok(Some(AccountRecord {
+                    handle: handle.to_owned(),
+                    role,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
+        let client = self.db.get_client().await.map_err(db_err)?;
+        let row = client
+            .query_opt("SELECT role FROM users WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?
+            .ok_or(IdentityError::UserNotFound)?;
+        let role: String = row.try_get("role").map_err(db_err)?;
+
+        // Release the pooled connection before issue_refresh_token acquires its own,
+        // or concurrent callers deadlock the pool (see login).
+        drop(row);
+        drop(client);
+
+        let token = self.issue_jwt(handle, &role)?;
+        let refresh_token = self.issue_refresh_token(handle, &role).await?;
+        Ok(TokenResponse {
+            token,
+            refresh_token: Some(refresh_token),
+            handle: handle.to_owned(),
+            role,
+        })
+    }
+
+    async fn revoke_sessions(&self, handle: &str) -> Result<(), IdentityError> {
+        self.db
+            .get_client()
+            .await
+            .map_err(db_err)?
+            .execute("DELETE FROM refresh_tokens WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?;
+        Ok(())
     }
 }

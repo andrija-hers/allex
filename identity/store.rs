@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 use transport::BearerTokenValidator;
 
 use crate::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
-    RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -327,5 +327,175 @@ impl BearerTokenValidator for InMemoryIdentityStore {
         }
         self.decode_jwt(token)
             .map(|c| format!("{}\x1e{}", c.sub, c.role))
+    }
+}
+
+impl AccountStore for InMemoryIdentityStore {
+    async fn verify_password(&self, handle: &str, password: &str) -> Result<bool, IdentityError> {
+        let stored_hash = {
+            let users = self.0.users.lock().await;
+            match users.get(handle) {
+                Some(u) => u.password_hash.clone(),
+                None => return Ok(false),
+            }
+        };
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || {
+            verify(password, &stored_hash).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn set_password(&self, handle: &str, new_password: &str) -> Result<(), IdentityError> {
+        let new_password = new_password.to_owned();
+        let password_hash = tokio::task::spawn_blocking(move || {
+            hash(new_password, DEFAULT_COST).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        let mut users = self.0.users.lock().await;
+        match users.get_mut(handle) {
+            Some(u) => {
+                u.password_hash = password_hash;
+                Ok(())
+            }
+            None => Err(IdentityError::UserNotFound),
+        }
+    }
+
+    async fn get_account(&self, handle: &str) -> Result<Option<AccountRecord>, IdentityError> {
+        let users = self.0.users.lock().await;
+        Ok(users.get(handle).map(|u| AccountRecord {
+            handle: handle.to_owned(),
+            role: u.role.clone(),
+        }))
+    }
+
+    async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
+        let role = {
+            let users = self.0.users.lock().await;
+            match users.get(handle) {
+                Some(u) => u.role.clone(),
+                None => return Err(IdentityError::UserNotFound),
+            }
+        };
+        let token = self.issue_jwt(handle, &role)?;
+        let refresh_token = self.issue_refresh_token(handle, &role).await;
+        Ok(TokenResponse {
+            token,
+            refresh_token: Some(refresh_token),
+            handle: handle.to_owned(),
+            role,
+        })
+    }
+
+    async fn revoke_sessions(&self, handle: &str) -> Result<(), IdentityError> {
+        self.0
+            .refresh_tokens
+            .lock()
+            .await
+            .retain(|_, (h, _, _)| h != handle);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod account_store_tests {
+    use super::*;
+
+    async fn store_with_user(handle: &str, password: &str, role: &str) -> InMemoryIdentityStore {
+        let store = InMemoryIdentityStore::new("test-secret");
+        store
+            .register(RegisterRequest {
+                handle: handle.into(),
+                password: password.into(),
+                role: role.into(),
+            })
+            .await
+            .unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn verify_password_matches_only_the_correct_password() {
+        let store = store_with_user("alice", "pw", "user").await;
+        assert!(store.verify_password("alice", "pw").await.unwrap());
+        assert!(!store.verify_password("alice", "wrong").await.unwrap());
+        // Unknown handle: Ok(false), not an error — existence is not leaked.
+        assert!(!store.verify_password("nobody", "pw").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_password_changes_login_and_reports_unknown_user() {
+        let store = store_with_user("bob", "old", "user").await;
+        store.set_password("bob", "new").await.unwrap();
+        assert!(!store.verify_password("bob", "old").await.unwrap());
+        assert!(store.verify_password("bob", "new").await.unwrap());
+        assert!(
+            store
+                .login(LoginRequest {
+                    handle: "bob".into(),
+                    password: "new".into(),
+                })
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            store.set_password("ghost", "x").await,
+            Err(IdentityError::UserNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_account_returns_role_or_none() {
+        let store = store_with_user("carol", "pw", "admin").await;
+        let record = store.get_account("carol").await.unwrap().unwrap();
+        assert_eq!(record.handle, "carol");
+        assert_eq!(record.role, "admin");
+        assert!(store.get_account("nobody").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn issue_session_mints_a_valid_usable_session() {
+        let store = store_with_user("dave", "pw", "user").await;
+        let session = store.issue_session("dave").await.unwrap();
+        assert_eq!(session.handle, "dave");
+        assert_eq!(session.role, "user");
+        // The access token validates through the normal path...
+        let validated = store
+            .validate(ValidateRequest {
+                token: session.token.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(validated.role, "user");
+        // ...and the refresh token works through the normal refresh path.
+        let refreshed = store
+            .refresh(RefreshRequest {
+                refresh_token: session.refresh_token.clone().unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(refreshed.handle, "dave");
+        assert!(matches!(
+            store.issue_session("ghost").await,
+            Err(IdentityError::UserNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoke_sessions_invalidates_existing_refresh_tokens() {
+        let store = store_with_user("erin", "pw", "user").await;
+        let session = store.issue_session("erin").await.unwrap();
+        let refresh_token = session.refresh_token.clone().unwrap();
+        store.revoke_sessions("erin").await.unwrap();
+        assert!(matches!(
+            store
+                .refresh(RefreshRequest { refresh_token })
+                .await,
+            Err(IdentityError::InvalidRefreshToken)
+        ));
     }
 }

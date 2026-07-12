@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, LogoutResponse, RefreshRequest,
-    RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use message_templates::{
@@ -541,6 +541,179 @@ impl BearerTokenValidator for RedbIdentityStore {
         }
         self.decode_jwt(token)
             .map(|c| format!("{}\x1e{}", c.sub, c.role))
+    }
+}
+
+impl AccountStore for RedbIdentityStore {
+    async fn verify_password(&self, handle: &str, password: &str) -> Result<bool, IdentityError> {
+        let db = self.database.clone();
+        let handle = handle.to_owned();
+        let stored = tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
+            read_user_sync(&db, &handle)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        let Some(stored) = stored else {
+            return Ok(false); // unknown handle — do not leak existence
+        };
+        let password = password.to_owned();
+        let password_hash = stored.password_hash;
+        tokio::task::spawn_blocking(move || {
+            verify(password, &password_hash).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn set_password(&self, handle: &str, new_password: &str) -> Result<(), IdentityError> {
+        let new_password = new_password.to_owned();
+        let password_hash = tokio::task::spawn_blocking(move || {
+            hash(new_password, DEFAULT_COST).map_err(|e| IdentityError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        let db = self.database.clone();
+        let handle = handle.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let write_tx = db
+                .begin_write()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            {
+                let mut table = write_tx
+                    .open_table(USERS_TABLE)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                let mut stored: StoredUser = {
+                    let Some(value) = table
+                        .get(handle.as_str())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?
+                    else {
+                        return Err(IdentityError::UserNotFound);
+                    };
+                    serde_json::from_slice(value.value())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?
+                };
+                stored.password_hash = password_hash;
+                let encoded = serde_json::to_vec(&stored)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                table
+                    .insert(handle.as_str(), encoded.as_slice())
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            }
+            write_tx
+                .commit()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn get_account(&self, handle: &str) -> Result<Option<AccountRecord>, IdentityError> {
+        let db = self.database.clone();
+        let handle_owned = handle.to_owned();
+        let stored = tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
+            read_user_sync(&db, &handle_owned)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+        Ok(stored.map(|u| AccountRecord {
+            handle: handle.to_owned(),
+            role: u.role,
+        }))
+    }
+
+    async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
+        let db = self.database.clone();
+        let handle_owned = handle.to_owned();
+        let role = tokio::task::spawn_blocking(move || -> Result<String, IdentityError> {
+            read_user_sync(&db, &handle_owned)?
+                .map(|u| u.role)
+                .ok_or(IdentityError::UserNotFound)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        let token = self.issue_jwt(handle, &role)?;
+
+        let db = self.database.clone();
+        let h = handle.to_owned();
+        let r = role.clone();
+        let ttl = self.refresh_token_ttl_secs;
+        let refresh_token = tokio::task::spawn_blocking(move || {
+            RedbIdentityStore::store_refresh_token_sync(&db, &h, &r, ttl)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+
+        Ok(TokenResponse {
+            token,
+            refresh_token: Some(refresh_token),
+            handle: handle.to_owned(),
+            role,
+        })
+    }
+
+    async fn revoke_sessions(&self, handle: &str) -> Result<(), IdentityError> {
+        let db = self.database.clone();
+        let handle = handle.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let write_tx = db
+                .begin_write()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            {
+                let mut table = write_tx
+                    .open_table(REFRESH_TOKENS_TABLE)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                let mut to_remove: Vec<String> = Vec::new();
+                {
+                    let iter = table
+                        .iter()
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                    for entry in iter {
+                        let (key, value) =
+                            entry.map_err(|e| IdentityError::Internal(e.to_string()))?;
+                        let stored: StoredRefreshToken = serde_json::from_slice(value.value())
+                            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                        if stored.handle == handle {
+                            to_remove.push(key.value().to_owned());
+                        }
+                    }
+                }
+                for token in to_remove {
+                    table
+                        .remove(token.as_str())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                }
+            }
+            write_tx
+                .commit()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+}
+
+/// Reads and deserializes a user record from redb (synchronous; call from `spawn_blocking`).
+fn read_user_sync(database: &Database, handle: &str) -> Result<Option<StoredUser>, IdentityError> {
+    let read_tx = database
+        .begin_read()
+        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+    let table = read_tx
+        .open_table(USERS_TABLE)
+        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+    match table
+        .get(handle)
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    {
+        Some(value) => Ok(Some(
+            serde_json::from_slice(value.value())
+                .map_err(|e| IdentityError::Internal(e.to_string()))?,
+        )),
+        None => Ok(None),
     }
 }
 

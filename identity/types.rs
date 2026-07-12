@@ -51,5 +51,9 @@ pub enum IdentityError {
     InvalidCredentials,
     InvalidToken,
     InvalidRefreshToken,
+    /// The named user does not exist. Returned by account-management operations
+    /// ([`crate::AccountStore`]) that target a specific handle; distinct from
+    /// `InvalidCredentials`, which login uses so it never leaks account existence.
+    UserNotFound,
     Internal(String),
 }
