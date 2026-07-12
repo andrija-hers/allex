@@ -11,6 +11,7 @@ path = "./lib.rs"
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 tokio-postgres = "0.7"
 futures = "0.3"
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "time", "macros", "rt-multi-thread"] }

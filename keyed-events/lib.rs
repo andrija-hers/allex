@@ -15,16 +15,23 @@
 //! listener per instance re-broadcasts received payloads into the local hub;
 //! per-key watchers (e.g. a streaming RPC) subscribe and forward live.
 //!
+//! - [`replay_and_watch`] — the third piece: it turns a hub subscription into the
+//!   `ProgressableFuture` a streaming RPC method returns, replaying a backlog and
+//!   then forwarding live events deduplicated by a monotonic id. This is the glue
+//!   both known consumers hand-wrote verbatim per streaming method.
+//!
 //! Note: `LISTEN` needs a real Postgres *session*, so the connection string must
 //! NOT go through a transaction-pooling proxy (PgBouncer in transaction mode).
 //! Point it straight at Postgres.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use progressable_future::ProgressableFuture;
 use tokio::sync::broadcast;
 
 /// A sharded, self-GC'ing in-process broadcaster keyed by `K`.
@@ -228,6 +235,101 @@ where
     result
 }
 
+/// Serves a "replay the backlog, then forward live events" subscription — the
+/// exact [`ProgressableFuture`] a streaming RPC method returns on top of a
+/// [`KeyedBroadcastHub`].
+///
+/// It runs the sequence both known consumers hand-wrote verbatim in every
+/// `watch_*` method:
+///
+/// 1. **Subscribe first.** [`subscribe_guarded`](KeyedBroadcastHub::subscribe_guarded)
+///    is called *before* the backlog read, so an event published in the gap
+///    between "read the table" and "start listening" is buffered rather than
+///    lost. The guard also GCs the hub entry when this future is dropped (client
+///    disconnect), so quiet keys never leak.
+/// 2. **Replay the backlog.** `backlog(after)` runs once; every row it returns is
+///    forwarded as a progress update, and the high-water mark advances to the
+///    largest `order(&event)` seen. Fold any per-request authorization check into
+///    this closure — returning `Err` from it becomes the stream's terminal error
+///    frame, and because nothing has been `recv`'d yet, a rejected caller never
+///    observes a live event.
+/// 3. **Forward live events, deduplicated.** Each event from the hub is forwarded
+///    only when `order(&event)` exceeds the high-water mark, so a backlog/live
+///    overlap (the same row seen both ways) is dropped exactly once. Broadcast
+///    lag is skipped; a closed hub channel ends the stream with `on_closed()`.
+///
+/// The returned future never completes *successfully* — it streams until the
+/// client goes away or the hub closes — so the success type `T` is unconstrained;
+/// pick `transport::Never` (or [`core::convert::Infallible`]) at the call site.
+/// `order` maps an event to its monotonic ordering id (typically a parsed row
+/// id); `after` is the id the caller has already seen (0 to replay all). Must be
+/// called inside a tokio runtime, like [`ProgressableFuture::new`].
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use allex_keyed_events::{KeyedBroadcastHub, replay_and_watch};
+/// # #[derive(Clone)] struct Msg { id: i64 }
+/// # enum Never {}
+/// # async fn doc(hub: Arc<KeyedBroadcastHub<String, Msg>>, key: String, after: i64) {
+/// let _pf: progressable_future::ProgressableFuture<Msg, Never, String> = replay_and_watch(
+///     &hub,
+///     key,
+///     after,
+///     |m: &Msg| m.id,
+///     move |after| async move { Ok::<_, String>(fetch_since(after).await) },
+///     || "stream closed".to_string(),
+/// );
+/// # }
+/// # async fn fetch_since(_after: i64) -> Vec<Msg> { Vec::new() }
+/// ```
+pub fn replay_and_watch<K, E, Id, T, Err, F, Fut>(
+    hub: &Arc<KeyedBroadcastHub<K, E>>,
+    key: K,
+    after: Id,
+    order: impl Fn(&E) -> Id + Send + 'static,
+    backlog: F,
+    on_closed: impl Fn() -> Err + Send + 'static,
+) -> ProgressableFuture<E, T, Err>
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    E: Clone + Send + 'static,
+    Id: Ord + Copy + Send + 'static,
+    T: Send + 'static,
+    Err: Send + 'static,
+    F: FnOnce(Id) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Vec<E>, Err>> + Send + 'static,
+{
+    let hub = Arc::clone(hub);
+    ProgressableFuture::new(move |sender| async move {
+        // Subscribe before the backlog read so nothing published in between is
+        // dropped; the guard reaps the hub entry when this future is cancelled.
+        let mut rx = hub.subscribe_guarded(&key);
+        let mut high = after;
+
+        for event in backlog(after).await? {
+            let id = order(&event);
+            if id > high {
+                high = id;
+            }
+            sender.progress(event);
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let id = order(&event);
+                    if id > high {
+                        high = id;
+                        sender.progress(event);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Err(on_closed()),
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +385,81 @@ mod tests {
             .collect();
         assert!(h.occupied_shards() > 1, "keys should spread across shards");
         assert_eq!(h.entry_count(), 8);
+    }
+
+    use futures::StreamExt;
+    use progressable_future::{ProgressableFuture, Step};
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Ev {
+        id: i64,
+    }
+
+    fn ev(id: i64) -> Ev {
+        Ev { id }
+    }
+
+    /// Collect the first `n` progress ids emitted by a `replay_and_watch` stream.
+    async fn progress_ids(pf: ProgressableFuture<Ev, (), String>, n: usize) -> Vec<i64> {
+        pf.stream()
+            .take(n)
+            .map(|step| match step {
+                Step::Progress(e) => e.id,
+                other => panic!("expected Progress, got {other:?}"),
+            })
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn replays_backlog_then_forwards_live_deduplicated() {
+        let hub = Arc::new(KeyedBroadcastHub::<String, Ev>::new(4, 32));
+        let feeder = Arc::clone(&hub);
+        let key = "room".to_string();
+
+        // The backlog closure runs *after* the internal subscribe, so publishing
+        // live events from inside it guarantees they land in the receiver — no
+        // race. id=2 overlaps the backlog high-water mark and must be dropped;
+        // id=3 is fresh and must be forwarded.
+        let feed_key = key.clone();
+        let pf: ProgressableFuture<Ev, (), String> = replay_and_watch(
+            &hub,
+            key,
+            0i64,
+            |e: &Ev| e.id,
+            move |_after| async move {
+                feeder.publish(&feed_key, ev(2));
+                feeder.publish(&feed_key, ev(3));
+                Ok(vec![ev(1), ev(2)])
+            },
+            || "closed".to_string(),
+        );
+
+        assert_eq!(progress_ids(pf, 3).await, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn honors_after_high_water_mark_for_live_events() {
+        let hub = Arc::new(KeyedBroadcastHub::<String, Ev>::new(4, 32));
+        let feeder = Arc::clone(&hub);
+        let key = "room".to_string();
+
+        // after=10 with an empty backlog: a stale live event (id=5) is filtered,
+        // a newer one (id=11) is forwarded.
+        let feed_key = key.clone();
+        let pf: ProgressableFuture<Ev, (), String> = replay_and_watch(
+            &hub,
+            key,
+            10i64,
+            |e: &Ev| e.id,
+            move |_after| async move {
+                feeder.publish(&feed_key, ev(5));
+                feeder.publish(&feed_key, ev(11));
+                Ok(Vec::new())
+            },
+            || "closed".to_string(),
+        );
+
+        assert_eq!(progress_ids(pf, 1).await, vec![11]);
     }
 }

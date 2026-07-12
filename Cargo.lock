@@ -153,6 +153,7 @@ dependencies = [
 name = "allex-keyed-events"
 version = "0.1.0"
 dependencies = [
+ "allex-progressable-future",
  "futures",
  "tokio",
  "tokio-postgres",

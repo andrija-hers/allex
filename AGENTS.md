@@ -110,6 +110,15 @@ top-level doc — read the crate-level `//!` comments for detail.
   keyed event bus, single-instance guard, and scripting helpers respectively.
   (`watch-singleton` **idea:** a `'static` hot-reloadable config singleton with an
   `Apply`/`register` push-on-change pattern — see its crate `//!`.)
+  (`keyed-events` **idea:** the three pieces of a cross-instance live feed —
+  `KeyedBroadcastHub` (per-key in-process fan-out) + `spawn_pg_notify_listener`
+  (reconnecting `LISTEN` driver) + **`replay_and_watch`** (the streaming-RPC glue:
+  subscribe → replay a backlog → forward live events deduplicated by a monotonic
+  id, returning the `ProgressableFuture` the method returns). Building a
+  `watch_*` streaming method over a NOTIFY bus? Call `replay_and_watch` — don't
+  re-hand-write the subscribe/backlog/dedup loop. Fold any per-request authz into
+  the backlog closure: its `Err` becomes the terminal frame before any live event
+  is seen. See its crate `//!`.)
 
 ## Identity — pick the right entry point
 
