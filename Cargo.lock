@@ -65,6 +65,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex-host"
+version = "0.1.0"
+dependencies = [
+ "allex-execution",
+ "allex-serve",
+ "allex-transport",
+ "axum",
+ "tokio",
+]
+
+[[package]]
 name = "allex-identity"
 version = "0.1.0"
 dependencies = [
@@ -97,6 +108,24 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "testcontainers-modules",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "allex-identity-redb"
+version = "0.1.0"
+dependencies = [
+ "allex-identity",
+ "allex-message-templates",
+ "allex-transport",
+ "bcrypt",
+ "jsonwebtoken",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -2494,6 +2523,15 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "redox_syscall"
