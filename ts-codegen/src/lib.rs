@@ -111,6 +111,9 @@ pub struct FieldInfo {
     ts: TsType,
     pub ts_type: String,
     pub skip: bool,
+    /// `#[serde(default)]`: the field may be absent from the wire and decodes to
+    /// its type's default rather than throwing.
+    pub has_default: bool,
 }
 
 pub struct EnumInfo {
@@ -240,6 +243,23 @@ impl TsType {
             TsType::Custom(name) => format!("encode{name}({val})"),
         }
     }
+
+    /// The TS constant serde's `#[serde(default)]` yields when the key is absent,
+    /// for the types whose default is expressible as a literal. Returns `None` for
+    /// types with no synthesizable default (a `Custom` DTO has no zero-value
+    /// literal, `never`/`unknown` have no meaningful one) — such fields keep the
+    /// throwing decode, matching serde's own inability to default them.
+    fn default_literal(&self) -> Option<&'static str> {
+        match self {
+            TsType::Number => Some("0"),
+            TsType::Bool => Some("false"),
+            TsType::Str => Some("''"),
+            TsType::List(_) => Some("[]"),
+            TsType::Record(_) => Some("{}"),
+            TsType::Nullable(_) => Some("null"),
+            TsType::Custom(_) | TsType::Never | TsType::Json | TsType::Unknown(_) => None,
+        }
+    }
 }
 
 // ===========================================================================
@@ -252,6 +272,9 @@ struct SerdeAttrs {
     rename: Option<String>,
     skip: bool,
     tag: Option<String>,
+    /// `#[serde(default)]` or `#[serde(default = "path")]`: the field may be
+    /// absent from the wire and is filled with a default on decode.
+    default: bool,
 }
 
 fn parse_serde_attrs(attrs: &[Attribute]) -> SerdeAttrs {
@@ -272,6 +295,12 @@ fn parse_serde_attrs(attrs: &[Attribute]) -> SerdeAttrs {
                 || meta.path.is_ident("skip_deserializing")
             {
                 out.skip = true;
+            } else if meta.path.is_ident("default") {
+                out.default = true;
+                // `default = "path"` also carries a value; consume it.
+                if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                }
             } else if meta.input.peek(syn::Token![=]) {
                 let _: syn::Expr = meta.value()?.parse()?;
             }
@@ -652,6 +681,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
         ts_type: ts.type_str(),
         ts,
         skip: serde.skip,
+        has_default: serde.default,
     })
 }
 
@@ -785,7 +815,20 @@ fn render_struct(s: &StructInfo) -> String {
     ));
     l.push("  return {".into());
     for f in &active {
-        let expr = f.ts.decode(&format!("json[{:?}]", f.json_name));
+        let access = format!("json[{:?}]", f.json_name);
+        let default_lit = (f.has_default && !matches!(f.ts, TsType::Nullable(_)))
+            .then(|| f.ts.default_literal())
+            .flatten();
+        let expr = if let Some(def) = default_lit {
+            // `#[serde(default)]`: an absent/null key decodes to the type's default.
+            // Decode through the nullable form (a present value decodes normally),
+            // then fall back — parenthesized so `??` binds to the whole conditional.
+            // (An already-`Option<T>` field is skipped: its decode tolerates absence.)
+            let nullable = TsType::Nullable(Box::new(f.ts.clone()));
+            format!("({}) ?? {def}", nullable.decode(&access))
+        } else {
+            f.ts.decode(&access)
+        };
         l.push(format!("    {}: {expr},", f.ts_name));
     }
     l.push("  };".into());
@@ -1375,6 +1418,41 @@ mod tests {
         assert!(
             !out.contains("\"StartsWith\""),
             "PascalCase must not leak to the wire: {out}"
+        );
+    }
+
+    #[test]
+    fn serde_default_field_decodes_to_type_default_when_absent() {
+        // A `#[serde(default)]` field must not throw on an omitted key (the old
+        // behavior: `(undefined as unknown[]).map(...)`); it falls back to its
+        // type's default. An `Option<T>` field already tolerates absence, so it
+        // keeps the plain nullable decode with no synthesized fallback.
+        let src = r#"
+            #[derive(Serialize, Deserialize)]
+            pub struct Feed {
+                pub id: String,
+                #[serde(default)]
+                pub tags: Vec<String>,
+                #[serde(default = "answer")]
+                pub count: u32,
+                #[serde(default)]
+                pub note: Option<String>,
+            }
+        "#;
+        let dtos = find_dto_types(src);
+        let out = render_dtos(&dtos);
+        // Defaulted, non-nullable fields fall back to the type default on an absent/null key.
+        assert!(out.contains(") ?? [],"), "tags decode fallback: {out}");
+        assert!(out.contains(") ?? 0,"), "count decode fallback (default = path also honored): {out}");
+        // The non-defaulted field keeps its plain decode (no `??`).
+        assert!(
+            out.contains("id: json[\"id\"] as string,"),
+            "id keeps plain decode: {out}"
+        );
+        // An `Option<T>` field is left to the nullable decode (no fallback synthesized).
+        assert!(
+            !out.contains(") ?? null,"),
+            "Option field should not get a fallback: {out}"
         );
     }
 }
