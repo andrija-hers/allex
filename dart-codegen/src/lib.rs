@@ -92,6 +92,9 @@ pub struct FieldInfo {
     /// True when the Rust type is `Option<T>`.
     pub is_optional: bool,
     pub skip: bool,
+    /// `#[serde(default)]`: the field may be absent from the wire and is filled
+    /// with its type's default on decode.
+    pub has_default: bool,
     /// `#[serde(flatten)]`: the field has no JSON key of its own. A flattened
     /// struct reads/writes its fields at the parent's level; a flattened map
     /// captures every key not consumed by the parent's named fields.
@@ -246,6 +249,23 @@ impl DartType {
 
     fn is_nullable(&self) -> bool {
         matches!(self, DartType::Nullable(_))
+    }
+
+    /// The Dart constant that serde's `#[serde(default)]` fills in when the field is absent, for
+    /// the types whose default is expressible as a `const`. Returns `None` for types with no
+    /// synthesizable default (custom classes have no zero-arg constructor, `dynamic`/`Never` have
+    /// no meaningful one) — such fields stay `required`.
+    fn default_literal(&self) -> Option<&'static str> {
+        match self {
+            DartType::Int => Some("0"),
+            DartType::Double => Some("0"),
+            DartType::Bool => Some("false"),
+            DartType::DartString => Some("''"),
+            DartType::List(_) => Some("const []"),
+            DartType::Map(..) => Some("const {}"),
+            DartType::Nullable(_) => Some("null"),
+            DartType::Custom(_) | DartType::Never | DartType::Json | DartType::Unknown(_) => None,
+        }
     }
 }
 
@@ -871,6 +891,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
             dart_type: "dynamic".into(),
             is_optional: false,
             skip: true,
+            has_default: false,
             flatten: false,
         });
     }
@@ -908,6 +929,7 @@ fn extract_field(field: &syn::Field, rename_all: Option<&str>) -> Option<FieldIn
         dart_type: dart_ty.type_str(),
         is_optional,
         skip: false,
+        has_default: serde.has_default,
         flatten: serde.flatten,
     })
 }
@@ -1076,8 +1098,14 @@ fn render_struct(s: &StructInfo) -> String {
     } else {
         lines.push(format!("  const {}({{", s.name));
         for f in &active {
+            let default_lit = f
+                .has_default
+                .then(|| restore_dart_type(&f.dart_type).default_literal())
+                .flatten();
             if f.is_optional {
                 lines.push(format!("    this.{},", f.dart_name));
+            } else if let Some(def) = default_lit {
+                lines.push(format!("    this.{} = {def},", f.dart_name));
             } else {
                 lines.push(format!("    required this.{},", f.dart_name));
             }
@@ -1095,10 +1123,20 @@ fn render_struct(s: &StructInfo) -> String {
         lines.push(format!("    return {}(", s.name));
         for f in &active {
             let dart_ty = restore_dart_type(&f.dart_type);
+            let access = format!("map['{}']", f.json_name);
             let decoded = if f.flatten {
                 flatten_decode_expr(&dart_ty, &active)
+            } else if let Some(def) = (f.has_default && !f.is_optional)
+                .then(|| dart_ty.default_literal())
+                .flatten()
+            {
+                // `#[serde(default)]`: an absent/null key decodes to the type's default.
+                // Decode through the nullable form (so a present value is decoded normally),
+                // then fall back — parenthesized so `??` binds to the whole conditional.
+                let nullable = DartType::Nullable(Box::new(dart_ty.clone()));
+                format!("({}) ?? {def}", nullable.decode(&access))
             } else {
-                dart_ty.decode(&format!("map['{}']", f.json_name))
+                dart_ty.decode(&access)
             };
             lines.push(format!("      {}: {decoded},", f.dart_name));
         }
@@ -2265,6 +2303,32 @@ mod tests {
         roots.dedup();
         let root_refs: Vec<&str> = roots.iter().map(String::as_str).collect();
         (modules.len(), reachable_dtos(all_dtos, &root_refs))
+    }
+
+    #[test]
+    fn serde_default_field_is_optional_with_fallback() {
+        let dtos = find_dto_types(
+            r#"
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize)]
+            pub struct Feed {
+                pub id: String,
+                #[serde(default)]
+                pub tags: Vec<String>,
+                #[serde(default)]
+                pub count: u32,
+            }
+        "#,
+        );
+        let out = render_dart_dtos("shared", &dtos, &[]);
+        // Defaulted fields become optional constructor params with the type's default …
+        assert!(out.contains("this.tags = const [],"), "tags default:\n{out}");
+        assert!(out.contains("this.count = 0,"), "count default:\n{out}");
+        assert!(out.contains("required this.id,"), "non-default field stays required:\n{out}");
+        // … and their decode tolerates an absent/null key, falling back to the default.
+        assert!(out.contains(") ?? const [],"), "tags decode fallback:\n{out}");
+        assert!(out.contains(") ?? 0,"), "count decode fallback:\n{out}");
     }
 
     #[test]
