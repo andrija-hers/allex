@@ -5,6 +5,13 @@
 //! TS output instead of Dart. DTO interfaces use camelCase property names; the generated
 //! `encode*`/`decode*` functions remap to/from the serde JSON wire keys, so the wire format is
 //! identical to the Rust/Dart clients.
+//!
+//! Parsing is source-level (`syn`), not macro expansion: [`find_rpc_modules`] finds every
+//! `#[rpc_module]` trait and [`find_reachable_dtos`] emits only the DTOs reachable from their
+//! method signatures. Multiple `--source` files are parsed independently and merged. `rename_all`
+//! is honored on struct fields *and* enum variants, and clients target the same `foo_v_1`-style
+//! module name as the Rust server — so TS, Dart, and Rust stay byte-compatible. Output starts with
+//! [`GENERATED_BANNER`]; regenerate rather than hand-edit.
 
 use std::collections::{HashSet, VecDeque};
 use syn::{

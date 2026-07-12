@@ -1,3 +1,12 @@
+//! The `FromRow` derive — map a `tokio_postgres::Row` onto a named-field struct.
+//!
+//! `#[derive(FromRow)]` generates `TryFrom<tokio_postgres::Row>` for a struct with named fields,
+//! pulling each field by column name via `row.try_get(..)`. Column names default to the field name;
+//! override one with `#[row(rename = "col")]`. The generated code refers to `tokio_postgres`
+//! **through `allex_postgres`'s re-export**, so a downstream crate only needs to depend on
+//! `allex-postgres`, never on `tokio-postgres` directly. Use this via that re-export
+//! (`allex_postgres::FromRow`) rather than depending on this macro crate on its own.
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;

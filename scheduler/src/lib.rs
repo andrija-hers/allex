@@ -1,3 +1,93 @@
+//! Timezone- and DST-correct **recurring schedules**, evaluated as a pure function of an instant.
+//!
+//! # The one idea that trips people up: this is a *tick engine*, not a timer
+//!
+//! There is **no clock here** — no threads, no async, no background task, no callback-at-the-
+//! right-moment. Nothing in this crate sleeps or fires on its own. You supply "now" as a
+//! `DateTime<Utc>` and every entry point ([`Schedule::analyze_at`],
+//! [`Schedule::next_scheduled_time_at`], [`Scheduler::recheck_all`], [`Window::in_window_at`])
+//! computes an answer synchronously from `(schedule, instant)` and returns. Given the same inputs
+//! it always returns the same output — which is why the tests just feed fixed UTC instants and
+//! assert, with no mocked clock.
+//!
+//! **The caller owns the loop.** Wire this into a tick source *you* control — a `tokio::time`
+//! interval, a cron process, a message handler — and on each tick call `analyze_at(now)` /
+//! `recheck_all(now)`. If you're looking for something that runs your job at 20:00, this isn't it;
+//! this is the thing that *tells you whether 20:00 has passed*. The actual firing, the timer, and
+//! the persistence are yours.
+//!
+//! # `last_ticked_day` is an idempotency key, not proof anything ran
+//!
+//! [`Schedule::analyze_at`] returns a [`ScheduleAnalysis`] with two fields, both **local calendar
+//! days** in the schedule's timezone:
+//!
+//! - `last_ticked_day` — the most recent active weekday whose scheduled instant is **≤ now**. This
+//!   is the day the schedule "should have fired by now."
+//! - `earliest_unticked_day` — the soonest active day whose scheduled instant is still in the
+//!   future (or today, if today is active and today's time hasn't arrived yet).
+//!
+//! The engine is **memoryless**: it does not know or track whether you actually acted on a day. To
+//! fire exactly once per occurrence, the *caller* persists its own "last day I processed" and acts
+//! only when `last_ticked_day` is newer. Because that comparison is against a day the engine
+//! recomputes from scratch every call, **downtime is self-healing**: if your process is down when
+//! 20:00 passes and comes back at 23:00, `last_ticked_day` is still today — you process the day you
+//! missed. Nothing is lost as long as *you* remember the last day you handled. (Granularity is one
+//! day: at most one tick per active day, and days are never skipped across restarts.)
+//!
+//! # Timezone & DST correctness — the crate's reason to exist
+//!
+//! A wall-clock time on a date is **not** a unique instant; converting one to UTC is a *relation*,
+//! not a function, and this crate exists to get the two DST edge cases right rather than crashing or
+//! silently skipping a day. `resolve_local_datetime` handles all three `chrono` outcomes:
+//!
+//! - **Single** — the normal case; one instant, used as-is.
+//! - **Ambiguous** (autumn *fall-back*, the wall time occurs twice) — the **earlier** instant is
+//!   chosen (`min`), i.e. the schedule fires on the *first* pass through that wall time.
+//! - **None** (spring *forward*, the wall time is skipped and never occurs) — the resolver walks
+//!   forward minute by minute to the first wall time that *does* exist, so the schedule fires at the
+//!   first valid minute after the gap. `DST_SEARCH_LIMIT_MINUTES` (24h) bounds that walk: real DST
+//!   gaps are an hour or two, so the cap only ever matters as a guard against a pathological zone —
+//!   past it the schedule is reported [`ScheduleError::UnresolvableLocalTime`] instead of looping.
+//!
+//! Everything reasons in the schedule's own timezone: you pass UTC, it converts to local to ask
+//! "which local day is it, and has today's local time arrived?" Active **weekdays are local
+//! weekdays** (`0 = Sunday … 6 = Saturday`), not UTC ones.
+//!
+//! # Two models, don't conflate them: [`Schedule`] vs [`Window`]
+//!
+//! - [`Schedule`] is a **single daily instant** — "fire at `time` on these weekdays." This is what
+//!   [`Scheduler`] drives, and what all the `analyze_at` / `next_scheduled_time` machinery is about.
+//! - [`Window`] is an **open/close range** — "are we *inside* the session right now?" (a market /
+//!   trading window that can wrap past midnight or run as a continuous weekly range). It's additive
+//!   and independent: it doesn't touch [`Schedule`]/[`Scheduler`], is evaluated in "week-seconds"
+//!   (`weekday*86400 + secs_of_day`), and is a point-in-time membership test, not a tick. Reach for
+//!   it when you need "is it open?", not "has it fired?".
+//!
+//! # Wiring many schedules: [`ScheduleTrait`] + [`ScheduleProcessor`] + [`Scheduler`]
+//!
+//! You don't have to convert your domain type into a bare [`Schedule`]: implement [`ScheduleTrait`]
+//! on it (carry your own id, label, payload alongside the `timezone`/`weekdays`/`time`) and hand it
+//! to [`Scheduler<T, P>`]. On each tick, [`Scheduler::recheck_all`] iterates every schedule (sorted
+//! by id, for deterministic order) and calls your [`ScheduleProcessor::process_schedule`] with the
+//! computed `last_ticked_day`; `start_processing` / `finish_processing` bracket the batch (open and
+//! commit a transaction there, say). The processor is where *your* idempotency check and firing
+//! live — the [`ScheduleProcessor`] side, not the [`Scheduler`], remembers what already ran.
+//!
+//! To hot-reload one source's entries without disturbing others, see
+//! [`Scheduler::replace_source_schedules`] and the `"{source_id}::"` id convention it relies on.
+//!
+//! ```
+//! use allex_scheduler::{Schedule, ScheduleTrait};
+//! use chrono::{TimeZone, Utc};
+//!
+//! // "20:00 on weekdays, New York time." No clock — we ask about a specific instant.
+//! let schedule = Schedule { timezone: "America/New_York".into(), weekdays: vec![1, 2, 3, 4, 5], time: [20, 0] };
+//! let now = Utc.with_ymd_and_hms(2024, 5, 18, 0, 0, 0).single().unwrap(); // Sat 00:00 UTC = Fri 20:00 NY
+//! let analysis = schedule.analyze_at(now).unwrap();
+//! assert_eq!(analysis.last_ticked_day_yyyymmdd(), "20240517");     // Friday's 20:00 has passed
+//! assert_eq!(analysis.earliest_unticked_day_yyyymmdd(), "20240520"); // next is Monday
+//! ```
+
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
     Timelike, Utc,

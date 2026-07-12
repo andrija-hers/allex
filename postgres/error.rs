@@ -3,7 +3,7 @@ use deadpool_postgres::PoolError;
 /// Error type returned by pool and query operations.
 ///
 /// The optional `AppError` type parameter lets closures passed to
-/// [`Db::with_client`] return domain errors alongside database errors, all
+/// [`crate::Db::with_client`] return domain errors alongside database errors, all
 /// through a single `?`-compatible type. Use the default (`Infallible`) when
 /// no application-level errors are needed.
 #[derive(Debug, thiserror::Error)]

@@ -1,3 +1,22 @@
+//! A process-global, hot-reloadable **config singleton** with a push-on-change consumer pattern.
+//!
+//! # The idea
+//!
+//! [`WatchSingleton<C>`] is a `'static`-safe holder for one shared value `C` (typically config),
+//! built on `tokio::sync::watch`. `const fn new()` lets you declare it as a `static`; call
+//! [`init`](WatchSingleton::init) exactly once at startup (**every other method panics before
+//! that**), then [`reload`](WatchSingleton::reload) to swap the value and notify everyone. Reads are
+//! cheap `Arc` snapshots via [`current`](WatchSingleton::current).
+//!
+//! # Reacting to changes: [`Apply`] + `register` + [`Handle`]
+//!
+//! Rather than poll the value and re-derive state, a consumer implements [`Apply<C>`](Apply) — how
+//! to fold a new `C` into itself — and calls [`register`](WatchSingleton::register), which **applies
+//! the current value immediately** and returns a [`Handle`]. Then drive updates in whichever style
+//! fits: [`apply_if_changed`](Handle::apply_if_changed) in a poll/tick loop (a no-op when
+//! unchanged), or [`next_change`](Handle::next_change) to await the next change in a `select!` loop.
+//! See [`WatchSingleton`] for a worked example.
+
 use std::sync::{Arc, OnceLock};
 use tokio::sync::watch;
 

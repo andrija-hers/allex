@@ -1,3 +1,16 @@
+//! Shared **contract types** for stored message templates — plus one pure render helper.
+//!
+//! This crate is *not* a service and *not* a store. It holds the request/response DTOs and the
+//! [`TemplateChannel`] enum that a notification/identity service exchanges over RPC, and a single
+//! pure function — [`render_stored_template`] — that renders a stored template body against JSON
+//! data with `tera`, **HTML auto-escaping off** (these are SMS/email/WhatsApp bodies, not web
+//! pages). *Where* templates are stored is the consumer's concern (e.g. `allex-identity-postgres`
+//! keeps a `message_templates` table). Keeping this a leaf crate of pure types lets any service
+//! depend on it without pulling in storage.
+//!
+//! Note: [`TemplateChannel::from_str`] returns `Option` (not `Result`) and is deliberately *not*
+//! the `FromStr` trait.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

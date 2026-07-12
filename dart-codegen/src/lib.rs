@@ -1,5 +1,22 @@
-//! Parses Rust source files, finds every `#[rpc_module]` trait and every
-//! serialisable struct/enum, and renders Dart client classes + DTO types.
+//! Generates a **Dart client + DTO types** from Rust `#[rpc_module]` source — wire-compatible with
+//! the Rust and TypeScript clients.
+//!
+//! # How it works: parse source, not macro output
+//!
+//! This crate reads Rust *source text* with `syn` — it never runs the `#[rpc_module]` proc-macro or
+//! compiles the crate — and re-derives the same contract from the syntax. [`find_rpc_modules`]
+//! locates every `#[rpc_module]` trait; [`find_reachable_dtos`] collects **only** the structs/enums
+//! actually reachable from those methods' signatures (not every type in the file); then
+//! [`render_dart_client`] and [`render_dart_dtos`] emit the code. Pass one or more `--source` files
+//! — they're parsed independently and merged, so DTOs may live across files.
+//!
+//! # The wire stays identical across languages
+//!
+//! Generated Dart uses idiomatic names, but its encode/decode remaps to the exact serde JSON wire
+//! keys — honoring `#[serde(rename_all = ..)]` on **both struct fields and enum variants** — and
+//! targets the same `foo_v_1`-style module name the Rust server registers. So the Dart, TypeScript
+//! (`allex-ts-codegen`), and Rust clients all speak the same bytes. Output starts with
+//! [`GENERATED_BANNER`]; regenerate rather than hand-edit.
 
 use std::collections::{HashSet, VecDeque};
 use syn::{

@@ -3,6 +3,12 @@
 //! Provides a connection pool wrapper ([`Db`]), a generic error type ([`DbError`]),
 //! row extension traits ([`RowExt`], [`RowVecExt`]), and the [`FromRow`] derive macro
 //! re-exported for convenience.
+//!
+//! [`Db`] wraps a `deadpool_postgres` pool: `Db::connect(conn_str)` builds it and
+//! [`Db::with_client`] runs a closure with a pooled client checked out just for that call. The
+//! crate **re-exports `tokio_postgres` and `deadpool_postgres`**, so downstream crates (and the
+//! code `FromRow` generates) name those types through `allex_postgres` without taking direct
+//! dependencies on them.
 
 pub use allex_postgres_macros::FromRow;
 

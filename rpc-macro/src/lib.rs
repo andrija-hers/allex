@@ -1,4 +1,83 @@
-//! Procedural macros for defining RPC modules and generating transport-facing glue.
+//! The `#[rpc_module]` attribute — **write one trait, get the whole RPC surface**.
+//!
+//! # The idea: the trait is the entire contract
+//!
+//! You declare a service as a plain Rust trait and annotate it with `#[rpc_module]`. From that one
+//! trait — its method signatures and its `#[public]` / `#[allowed_roles(..)]` attributes — the
+//! macro derives *everything* on both sides of the wire. **You never hand-write a client, a request
+//! router, a role check, or (de)serialization glue.** The trait itself is the source of truth for
+//! request/response types *and* access control; the macro is the only thing that reads it.
+//!
+//! The annotated trait is re-emitted essentially verbatim (the `#[public]`/`#[allowed_roles]`
+//! attributes are stripped from it), so the server side is just `impl FooV1 for MyService { .. }` —
+//! a normal trait impl with no framework types in the signatures. Doc comments on trait methods are
+//! copied onto the generated client methods, so your API docs follow the contract to callers.
+//!
+//! # Method *shape* selects unary vs streaming — by return type, not an attribute
+//!
+//! This is the thing people miss: whether a method is a one-shot call or a progress stream is
+//! decided by **what it returns**, which the macro pattern-matches. There is no `#[streaming]`
+//! flag.
+//!
+//! ```ignore
+//! #[rpc_module]
+//! pub trait ArithmeticV1 {
+//!     // unary, sync:   -> Result<T, E>
+//!     #[public]
+//!     fn add(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+//!
+//!     // unary, async:  -> impl Future<Output = Result<T, E>> + Send
+//!     #[allowed_roles("user")]
+//!     fn mul(&self, req: MulRequest) -> impl Future<Output = Result<MulResult, ArithmeticError>> + Send;
+//!
+//!     // STREAMING:     -> ProgressableFuture<Progress, Success, Error>
+//!     #[allowed_roles("admin")]
+//!     fn count(&self, req: CountRequest) -> ProgressableFuture<CountStep, StepsMade, ArithmeticError>;
+//! }
+//! ```
+//!
+//! Return `Result<S, E>` (sync or behind `impl Future`) for a **unary** method; return a
+//! `ProgressableFuture<P, S, E>` for a **streaming** one. Every method takes
+//! **exactly one request argument after `&self`** — bundle multiple parameters into a struct.
+//! Violating either rule is a compile error from this macro, not a mysterious downstream one.
+//!
+//! # What it generates (names derived from the trait, e.g. `FooV1`)
+//!
+//! - **`FooV1Client<C: UnaryCodec>`** — a client *trait with a blanket impl* for any transport that
+//!   satisfies the needed `transport::ClientSide*Transport` bounds. So a working client exists for
+//!   free on every transport (reqwest / websocket / signalr / axum-test): you just call
+//!   `client.add(req).await`. Unary calls return a `transport::ProgressOutcome<S, E,
+//!   transport::Error>` (success / app-error / transport-fault — the three outcomes, kept
+//!   distinct), streaming calls return a `ProgressableFuture`.
+//! - **`FooV1MethodResponder<I, C>`** — the server adapter. Wrap your `impl FooV1` in
+//!   `FooV1MethodResponder::<_, JsonCodec>::new(svc)` and register it in an `execution::Registry`;
+//!   it implements both `execution::MethodResponder` (unary) and `StreamingMethodExecutor`.
+//! - **`FooV1MethodPermissions`** — the role table: `MODULE_NAME`, `allowed_roles(method)`,
+//!   `is_public(method)`, `is_authorized(method, caller_role)`.
+//! - `FooV1ResponseStream` (the pinned stream alias) and two private codec helpers.
+//!
+//! # Gotcha: the wire module name splits the version — `FooV1` → `foo_v_1`
+//!
+//! The on-wire module id is the snake_case of the trait name, and the derivation inserts an
+//! underscore *before a trailing version digit*. So `ArithmeticV1` is **`arithmetic_v_1`** on the
+//! wire (not `arithmetic_v1`), `IdentityV1` is `identity_v_1`. You almost never type this — the
+//! generated client and responder agree on it — but if you hand-build a `ModuleMethodCall`, match a
+//! module string, or read `MODULE_NAME`, expect the `_v_1` form.
+//!
+//! # Authorization is enforced *in the generated dispatch, before the body is decoded*
+//!
+//! The responder calls `FooV1MethodPermissions::is_authorized(method, caller_role)` as the first
+//! thing in `execute` / `execute_streaming`; a failure returns `transport::Error::AccessForbidden`
+//! (→ HTTP 403) **without decoding the request**. `caller_role` arrives in the encoded wire form
+//! (`handle\x1erole`); the check extracts the role segment itself. Anonymous callers (`None`) pass
+//! only `#[public]` methods. This is *where* the "auth is attributes on the trait" rule in the
+//! workspace `AGENTS.md` is actually implemented — you never write the check.
+//!
+//! ## The living example
+//!
+//! The `examples/arithmetic_base` crate declares the trait above; the `arithmetic_client` /
+//! `arithmetic_server` / `arithmetic_tests` crates exercise the generated client and responder over
+//! every transport. Read those before writing a new module.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
