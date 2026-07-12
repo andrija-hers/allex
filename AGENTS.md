@@ -55,7 +55,12 @@ top-level doc — read the crate-level `//!` comments for detail.
   `#[rpc_module]` source file. **Idea:** they parse Rust *source* (not macro output),
   emit only DTOs *reachable* from method signatures, and remap to the exact serde JSON
   wire keys (`rename_all` honored on struct fields **and** enum variants) so all
-  language clients are byte-compatible. See the crate `//!`.
+  language clients are byte-compatible. Pass several files with repeated `--source`
+  (each parsed independently, so a non-first file's `//!` header is fine) and DTOs
+  resolve across files. **The identity client is generated, not hand-written** — feed
+  `identity/lib.rs` + `identity/types.rs` alongside your own contract sources; the
+  `tests/golden/` fixture in each codegen crate is the guarded reference output. See
+  the crate `//!`.
 
 **Runtime**
 - `transport` (`allex-transport`) — wire types (`Payload`, `Error`,

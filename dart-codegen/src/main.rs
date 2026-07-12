@@ -5,8 +5,8 @@ use std::{
 };
 
 use allex_dart_codegen::{
-    find_reachable_dtos, find_rpc_modules, referenced_type_names, render_dart_client_importing,
-    render_dart_dtos,
+    DtoInfo, RpcModuleInfo, find_dto_types, find_rpc_modules, reachable_dtos,
+    referenced_type_names, render_dart_client_importing, render_dart_dtos,
 };
 
 fn main() {
@@ -19,14 +19,18 @@ fn main() {
 fn run(args: Vec<String>) -> Result<(), String> {
     let usage = "usage: cargo run -p allex-dart-codegen -- --source <rust-file> [--source <rust-file> ...] --out-dir <dart-dir>";
     let (source_paths, out_dir) = parse_args(args, usage)?;
-    let mut source = String::new();
+
+    // Parse each source file independently and merge the results. A plain text concatenation of
+    // Rust files is not valid Rust — a non-first file's `//!` inner-doc header (or any `#![…]` crate
+    // attribute) is only legal at the very start of a file, so it would fail to parse mid-stream.
+    let mut modules: Vec<RpcModuleInfo> = Vec::new();
+    let mut all_dtos: Vec<DtoInfo> = Vec::new();
     for source_path in &source_paths {
         let contents = fs::read_to_string(source_path)
             .map_err(|err| format!("failed to read {}: {err}", source_path.display()))?;
-        source.push_str(&contents);
-        source.push('\n');
+        modules.extend(find_rpc_modules(&contents));
+        all_dtos.extend(find_dto_types(&contents));
     }
-    let modules = find_rpc_modules(&source);
     if modules.is_empty() {
         let listed = source_paths
             .iter()
@@ -50,7 +54,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     roots.sort();
     roots.dedup();
     let root_refs = roots.iter().map(String::as_str).collect::<Vec<_>>();
-    let dtos = find_reachable_dtos(&source, &root_refs);
+    let dtos = reachable_dtos(all_dtos, &root_refs);
 
     const SHARED_DTOS: &str = "dtos.dart";
     let dto_path = out_dir.join(SHARED_DTOS);

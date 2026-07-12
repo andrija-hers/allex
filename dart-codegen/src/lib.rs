@@ -389,8 +389,18 @@ pub fn find_dto_types(source: &str) -> Vec<DtoInfo> {
 /// field types transitively.  Types not found in `source` are treated as
 /// external and are not included in the output but are still followed
 /// (so their own fields don't prevent discovery of siblings).
+///
+/// Single-source convenience over [`reachable_dtos`]; for multi-file input parse each file with
+/// [`find_dto_types`], concatenate the `Vec<DtoInfo>`s, and call [`reachable_dtos`] directly.
 pub fn find_reachable_dtos(source: &str, roots: &[&str]) -> Vec<DtoInfo> {
-    let all = find_dto_types(source);
+    reachable_dtos(find_dto_types(source), roots)
+}
+
+/// Return the reachable subset of an already-collected DTO list, following field types transitively
+/// from `roots`. Use this to resolve DTOs across several files (each parsed independently with
+/// [`find_dto_types`]) — the correct multi-file strategy, since a plain text concatenation of Rust
+/// files is not valid Rust (a non-first file's `//!`/`#![…]` header is only legal at file start).
+pub fn reachable_dtos(all: Vec<DtoInfo>, roots: &[&str]) -> Vec<DtoInfo> {
     let index: std::collections::HashMap<&str, usize> =
         all.iter().enumerate().map(|(i, d)| (d.name(), i)).collect();
 
@@ -2207,5 +2217,85 @@ mod tests {
             }
         "#,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-file: parse each source independently, then resolve cross-file DTOs.
+    // Regression for the old concat-into-one-string approach, which broke when a
+    // non-first file led with a `//!` inner-doc header (illegal mid-stream).
+    // -----------------------------------------------------------------------
+
+    /// Same DTOs as `ARITHMETIC_DTOS`, but in a file that opens with a `//!` header —
+    /// this is what made the old text-concatenation parse fail.
+    const ARITHMETIC_DTOS_WITH_INNER_DOC: &str = r#"
+        //! Data-transfer types for the arithmetic service.
+        //! A crate-level inner doc comment — only legal at the start of a file.
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct AddRequest { pub a: i32, pub b: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct AddResult { pub r: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct CountRequest { pub from: i32, pub to: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct CountStep { pub currently_at: i32 }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct StepsMade { pub total: i32 }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub enum ArithmeticError { Overflow, Interrupted, Transport(String) }
+    "#;
+
+    // Mirror of `main::run`'s per-file merge over an ordered source list; returns
+    // (module count, reachable DTOs).
+    fn resolve_multifile(sources: &[&str]) -> (usize, Vec<DtoInfo>) {
+        let mut modules = Vec::new();
+        let mut all_dtos = Vec::new();
+        for src in sources {
+            modules.extend(find_rpc_modules(src));
+            all_dtos.extend(find_dto_types(src));
+        }
+        let mut roots: Vec<String> = modules.iter().flat_map(referenced_type_names).collect();
+        roots.sort();
+        roots.dedup();
+        let root_refs: Vec<&str> = roots.iter().map(String::as_str).collect();
+        (modules.len(), reachable_dtos(all_dtos, &root_refs))
+    }
+
+    #[test]
+    fn resolves_dtos_across_files_with_inner_doc_header() {
+        let (module_count, dtos) =
+            resolve_multifile(&[ARITHMETIC_TRAIT, ARITHMETIC_DTOS_WITH_INNER_DOC]);
+        assert_eq!(module_count, 1);
+        let names: Vec<&str> = dtos.iter().map(DtoInfo::name).collect();
+        // Every type referenced by the trait's methods is resolved from the second file.
+        for expected in [
+            "AddRequest",
+            "AddResult",
+            "CountRequest",
+            "CountStep",
+            "StepsMade",
+            "ArithmeticError",
+        ] {
+            assert!(names.contains(&expected), "missing DTO {expected} in {names:?}");
+        }
+    }
+
+    #[test]
+    fn multifile_resolution_is_order_independent() {
+        let (fwd_mods, fwd_dtos) =
+            resolve_multifile(&[ARITHMETIC_TRAIT, ARITHMETIC_DTOS_WITH_INNER_DOC]);
+        // Trait file second, DTO (with `//!`) first — the order that broke concatenation.
+        let (rev_mods, rev_dtos) =
+            resolve_multifile(&[ARITHMETIC_DTOS_WITH_INNER_DOC, ARITHMETIC_TRAIT]);
+        assert_eq!(fwd_mods, rev_mods);
+        let fwd: Vec<&str> = fwd_dtos.iter().map(DtoInfo::name).collect();
+        let rev: Vec<&str> = rev_dtos.iter().map(DtoInfo::name).collect();
+        assert_eq!(fwd, rev);
     }
 }
