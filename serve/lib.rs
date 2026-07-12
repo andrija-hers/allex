@@ -11,7 +11,10 @@
 //! module implementations can read the authenticated caller via
 //! [`caller_handle`] / [`caller_role`] without each project defining its own.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use execution::{ModuleExecutor, Registry};
 use futures::StreamExt;
@@ -23,6 +26,9 @@ use transport::{
 
 tokio::task_local! {
     static CALLER: CallerContext;
+    // Set by `deny_access()` inside a method body to escalate a per-object
+    // authorization failure to a transport-level 403 (see `deny_access`).
+    static ACCESS_DENIED: Arc<AtomicBool>;
 }
 
 /// The authenticated caller for the current request.
@@ -95,6 +101,47 @@ pub fn caller_profile() -> Option<String> {
     CALLER.try_with(|c| c.profile.clone()).ok().flatten()
 }
 
+/// Marks the current RPC call as **access-denied**, so the server responds with a
+/// transport-level Forbidden (**HTTP 403**) instead of a 422 application error —
+/// whatever domain error your method returns afterwards.
+///
+/// Use it for **per-object authorization** inside a method body — "only the creator
+/// may edit this", "you can't read someone else's record" — the fine-grained check
+/// the coarse `#[allowed_roles(..)]` gate can't express. The `#[allowed_roles]` gate
+/// already yields 403 for a role mismatch; this extends the same status to method-body
+/// decisions, so per-object denials stop masquerading as 422 domain errors.
+///
+/// Outside a served request (a direct call or a unit test) it is a **no-op**, so your
+/// method's returned error is used as-is. Prefer [`authorize`] for the common
+/// check-and-return shape. Applies to **unary** methods (streaming methods signal
+/// denial with a terminal error frame).
+pub fn deny_access() {
+    let _ = ACCESS_DENIED.try_with(|flag| flag.store(true, Ordering::Relaxed));
+}
+
+/// Per-object authorization guard: returns `Ok(())` when `authorized`, otherwise calls
+/// [`deny_access`] (→ HTTP 403) and returns `Err(forbidden_error)` so you can `?` it.
+///
+/// ```ignore
+/// async fn edit(&self, req: EditReq) -> Result<Edited, MyError> {
+///     let doc = self.load(req.id).await?;
+///     allex_serve::authorize(doc.owner.as_deref() == caller_handle().as_deref(),
+///                            MyError::Forbidden)?;   // 403 if not the owner
+///     // … proceed …
+/// }
+/// ```
+///
+/// The `forbidden_error` is your own domain error: it becomes the (bodyless) 403 within a
+/// served request, and is returned normally when called outside one.
+pub fn authorize<E>(authorized: bool, forbidden_error: E) -> Result<(), E> {
+    if authorized {
+        Ok(())
+    } else {
+        deny_access();
+        Err(forbidden_error)
+    }
+}
+
 /// Drains `transport`'s incoming requests and dispatches each through `registry`,
 /// spawning a task per request so they run concurrently.
 ///
@@ -155,14 +202,28 @@ where
         return;
     }
 
-    // Unary.
-    let response = CALLER
-        .scope(ctx, async {
-            registry
-                .execute(&module, &method, payload, role.as_deref())
-                .await
-        })
+    // Unary. Wrap dispatch in an ACCESS_DENIED scope so a method can escalate a
+    // per-object authorization failure to a transport-level 403 via `deny_access()`.
+    let access_denied = Arc::new(AtomicBool::new(false));
+    let response = ACCESS_DENIED
+        .scope(
+            access_denied.clone(),
+            CALLER.scope(ctx, async {
+                registry
+                    .execute(&module, &method, payload, role.as_deref())
+                    .await
+            }),
+        )
         .await;
+
+    if access_denied.load(Ordering::Relaxed) {
+        // A method called `deny_access()`: respond 403, ignoring the domain error
+        // it returned (which would otherwise have been a 422 application error).
+        let _ = item
+            .respond_with_transport_error(TransportError::AccessForbidden)
+            .await;
+        return;
+    }
 
     match response {
         Ok(payload) => {
@@ -179,7 +240,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::CallerContext;
+    use super::*;
 
     const RS: char = '\u{1e}';
 
@@ -227,5 +288,33 @@ mod tests {
         assert_eq!(c.handle.as_deref(), Some("operator"));
         assert_eq!(c.role.as_deref(), Some("operator"));
         assert_eq!(c.profile, None);
+    }
+
+    #[test]
+    fn authorize_true_does_not_deny() {
+        let flag = Arc::new(AtomicBool::new(false));
+        ACCESS_DENIED.sync_scope(flag.clone(), || {
+            assert!(authorize(true, "unused").is_ok());
+        });
+        assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn authorize_false_denies_and_returns_the_error() {
+        let flag = Arc::new(AtomicBool::new(false));
+        ACCESS_DENIED.sync_scope(flag.clone(), || {
+            let result: Result<(), &str> = authorize(false, "forbidden");
+            assert_eq!(result, Err("forbidden"));
+        });
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn deny_outside_a_request_is_a_noop_and_keeps_the_error() {
+        // No ACCESS_DENIED scope (e.g. a direct call or unit test): must not panic,
+        // and the domain error is still returned for the caller to handle normally.
+        deny_access();
+        let result: Result<(), &str> = authorize(false, "still-an-error");
+        assert_eq!(result, Err("still-an-error"));
     }
 }
