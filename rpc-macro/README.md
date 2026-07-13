@@ -19,7 +19,7 @@ check.
 ## Example
 
 ```rust
-use allex_rpc_macros::{rpc_module, public, allowed_roles};
+use allex_rpc_macros::rpc_module; // #[public] / #[allowed_roles] are inner attributes of #[rpc_module]
 
 #[rpc_module]
 trait CounterV1 {
