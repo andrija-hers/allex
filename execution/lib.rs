@@ -36,7 +36,8 @@
 //! - `Success` / `Progress` → `Ok(payload)`
 //! - `Error(payload)` → `Err(Error::App(payload))` — a **domain** error (→ HTTP 422)
 //! - `TransportError(err)` → `Err(err)` — passed through **without** app-error wrapping, so an auth
-//!   rejection (`AccessForbidden`) stays a transport fault (→ HTTP 403)
+//!   rejection (`AccessForbidden`) stays a transport fault (→ HTTP 403). An unregistered module
+//!   (`ModuleNotFound`, from [`Registry`]) is likewise a transport error (→ HTTP 404), not a 422.
 //!
 //! That distinction is the whole reason [`MethodResponder`] returns `Response` instead of a bare
 //! `Result`: it keeps "you were forbidden" from being mis-encoded as "your call returned an error".

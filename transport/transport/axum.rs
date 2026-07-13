@@ -240,6 +240,9 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 warn!(response_kind = "transport_error", transport_error = ?error, "sending transport error response");
                 match error {
                     Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                    // Calling an unregistered module is a client addressing error,
+                    // not a server fault -> 404, not 500.
+                    Error::ModuleNotFound => StatusCode::NOT_FOUND.into_response(),
                     _ => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &format!("Transport error: {error:?}"),
@@ -373,6 +376,9 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
                 warn!(response_kind = "transport_error", transport_error = ?error, "sending transport error response");
                 match error {
                     Error::AccessForbidden => StatusCode::FORBIDDEN.into_response(),
+                    // Calling an unregistered module is a client addressing error,
+                    // not a server fault -> 404, not 500.
+                    Error::ModuleNotFound => StatusCode::NOT_FOUND.into_response(),
                     _ => error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &format!("Transport error: {error:?}"),

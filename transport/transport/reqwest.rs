@@ -6,9 +6,15 @@ use serde::Serialize;
 use std::{future::Future, pin::Pin};
 
 /// HTTP transport that sends unary and chunked RPC requests over `POST /rpc`.
+///
+/// The [`reqwest::Client`] is built once and reused for every call: it owns the connection
+/// pool, so a single instance keeps connections alive across requests (and negotiates HTTP/2
+/// via ALPN when the hop is TLS). Constructing a fresh client per request would discard the
+/// pool and force a new handshake each time.
 pub struct HttpTransport {
     base_url: String,
     bearer: Option<String>,
+    client: reqwest::Client,
 }
 
 impl HttpTransport {
@@ -17,6 +23,7 @@ impl HttpTransport {
         Self {
             base_url: format!("{}/rpc", base_url),
             bearer: None,
+            client: reqwest::Client::new(),
         }
     }
 
@@ -25,6 +32,7 @@ impl HttpTransport {
         Self {
             base_url: format!("{}/rpc", base_url),
             bearer: Some(token.into()),
+            client: reqwest::Client::new(),
         }
     }
 }
@@ -136,9 +144,9 @@ impl OneShotTransport for HttpTransport {
     fn send_payload(&self, payload: Payload) -> impl Future<Output = Result<Payload>> + Send {
         let url = self.base_url.clone();
         let bearer = self.bearer.clone();
+        let client = self.client.clone();
 
         async move {
-            let client = reqwest::Client::new();
             let mut req = client.post(&url).json(&payload);
             if let Some(token) = &bearer {
                 req = req.bearer_auth(token);
@@ -170,6 +178,12 @@ impl OneShotTransport for HttpTransport {
                 return Err(Error::AccessForbidden);
             }
 
+            // HTTP 404 = the addressed module/method isn't registered. The bare
+            // status can't distinguish the two, so surface the umbrella variant.
+            if status == StatusCode::NOT_FOUND {
+                return Err(Error::ModuleNotFound);
+            }
+
             if !status.is_success() {
                 return Err(http_status_error(&url, status, &body));
             }
@@ -190,9 +204,9 @@ impl ChunkedTransport for HttpTransport {
     ) -> impl Future<Output = Result<CallResponseStream>> + Send {
         let url = self.base_url.clone();
         let bearer = self.bearer.clone();
+        let client = self.client.clone();
 
         async move {
-            let client = reqwest::Client::new();
             let mut req = client.post(&url).json(&payload);
             if let Some(token) = &bearer {
                 req = req.bearer_auth(token);

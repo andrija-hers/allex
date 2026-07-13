@@ -48,6 +48,7 @@
 //! | streaming success | **200**, `Content-Type: application/x-ndjson` |
 //! | application error (`Err(YourError)` → `Error::App`) | **422** |
 //! | failed role check (`Error::AccessForbidden`) | **403** |
+//! | unregistered module (`Error::ModuleNotFound`) | **404** |
 //! | undecodable request body | **400** |
 //! | dispatch/channel fault | **500** |
 //!

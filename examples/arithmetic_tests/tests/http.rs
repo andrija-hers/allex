@@ -4,7 +4,7 @@ use common::start_http_server;
 use arithmetic_base::{AddRequest, ArithmeticV1Client, CountRequest, MulRequest};
 use futures::{StreamExt, pin_mut};
 use progressable_future::Step;
-use transport::{HttpTransport, JsonCodec, ProgressOutcome};
+use transport::{ClientSideOneShotTransport, Error, HttpTransport, JsonCodec, ProgressOutcome};
 
 #[tokio::test]
 async fn add_over_http() {
@@ -69,4 +69,48 @@ async fn count_over_http() {
 
     assert_eq!(progress_values, vec![1, 2, 3, 4]);
     assert_eq!(total, Some(4));
+}
+
+// A call to a non-existent method on a *registered* module is caught by the
+// responder's authorization gate (an unknown method is authorized for no role)
+// and returns 403 AccessForbidden, before method lookup. Whether this should
+// instead be a 404 is an open design decision; this test pins the current
+// behavior so a change is deliberate.
+#[tokio::test]
+async fn unknown_method_is_rejected_by_auth_gate() {
+    let base_url = start_http_server().await;
+    let transport = HttpTransport::new(&base_url);
+
+    let result = <HttpTransport as ClientSideOneShotTransport<JsonCodec, AddRequest>>::execute_module_method_call(
+        &transport,
+        "arithmetic_v_1",
+        "nonexistent_method",
+        AddRequest { a: 1, b: 1 },
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(Error::AccessForbidden)),
+        "unknown method is currently rejected by the auth gate as 403, got: {result:?}"
+    );
+}
+
+// An unregistered module has no auth gate in front of it -> 404, not 500.
+#[tokio::test]
+async fn unknown_module_maps_to_not_found_over_http() {
+    let base_url = start_http_server().await;
+    let transport = HttpTransport::new(&base_url);
+
+    let result = <HttpTransport as ClientSideOneShotTransport<JsonCodec, AddRequest>>::execute_module_method_call(
+        &transport,
+        "ghost_v_1",
+        "add",
+        AddRequest { a: 1, b: 1 },
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(Error::ModuleNotFound)),
+        "unknown module should surface as ModuleNotFound (HTTP 404), got: {result:?}"
+    );
 }

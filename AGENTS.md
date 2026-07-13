@@ -35,9 +35,11 @@ top-level doc — read the crate-level `//!` comments for detail.
 5. **Error → HTTP status** (axum transport): success = **200** (or
    `application/x-ndjson` for a stream); application error (`Err(YourError)`,
    i.e. `transport::Error::App`) = **422**; failed role check
-   (`Error::AccessForbidden`) = **403**; bad request body = **400**; transport
-   fault = **500**. **There is no 401** — 403 is authz, 422 is a domain/credential
-   error. For **per-object** authz inside a unary method (beyond the coarse
+   (`Error::AccessForbidden`) = **403** (an unknown *method* on a registered
+   module is rejected here — the authz gate runs before method lookup — so it is
+   403, not 404); a call to an unregistered **module** (`Error::ModuleNotFound`) =
+   **404**; bad request body = **400**; transport fault = **500**. **There is no
+   401** — 403 is authz, 422 is a domain/credential error. For **per-object** authz inside a unary method (beyond the coarse
    `#[allowed_roles]` gate — "only the creator may edit this"), call
    `allex_serve::deny_access()` (or `allex_serve::authorize(cond, err)?`) so the
    denial becomes a **403**, not a 422 — otherwise a domain `Err` reads as an
