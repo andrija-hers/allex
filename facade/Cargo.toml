@@ -1,0 +1,81 @@
+[package]
+name = "allex"
+description = "Contract-first RPC framework for Rust: declare a service as a trait, get typed Rust/Dart/TypeScript clients, declarative authorization, identity, and an axum host — batteries in the box. Umbrella crate re-exporting the allex-* crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "rpc", "framework", "codegen", "axum"]
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# "Stand up a backend" — the common case.
+default = ["host", "identity"]
+
+# --- building blocks ---
+contract = ["allex-rpc-macros", "allex-transport", "allex-execution", "allex-progressable-future"]
+serve = ["contract", "allex-serve"]
+host = ["serve", "allex-host"]
+
+# --- identity ---
+identity = ["allex-identity"]
+identity-sqlite = ["identity", "allex-identity-sqlite"]
+identity-postgres = ["identity", "allex-identity-postgres"]
+identity-redb = ["identity", "allex-identity-redb"]
+
+# --- capabilities ---
+state = ["allex-state"]
+scheduler = ["allex-scheduler"]
+keyed-events = ["allex-keyed-events"]
+codegen = ["allex-dart-codegen", "allex-ts-codegen"]
+
+# --- data / utilities ---
+postgres = ["allex-postgres"]
+awaitable-map = ["allex-awaitable-map"]
+message-templates = ["allex-message-templates"]
+mailgunner = ["allex-mailgunner"]
+watch-singleton = ["allex-watch-singleton"]
+guards = ["allex-guards"]
+script = ["allex-script"]
+winsvc = ["allex-winsvc"]
+
+# Everything.
+full = [
+    "host", "identity", "identity-sqlite", "identity-postgres", "identity-redb",
+    "state", "scheduler", "keyed-events", "codegen", "postgres", "awaitable-map",
+    "message-templates", "mailgunner", "watch-singleton", "guards", "script", "winsvc",
+]
+
+[dependencies]
+allex-rpc-macros = { path = "../rpc-macro", version = "0.1", optional = true }
+allex-transport = { path = "../transport", version = "0.1", optional = true }
+allex-execution = { path = "../execution", version = "0.1", optional = true }
+allex-progressable-future = { path = "../progressable-future", version = "0.1", optional = true }
+allex-serve = { path = "../serve", version = "0.1", optional = true }
+allex-host = { path = "../host", version = "0.1", optional = true }
+allex-identity = { path = "../identity", version = "0.1", optional = true }
+allex-identity-sqlite = { path = "../identity-sqlite", version = "0.1", optional = true }
+allex-identity-postgres = { path = "../identity-postgres", version = "0.1", optional = true }
+allex-identity-redb = { path = "../identity-redb", version = "0.1", optional = true }
+allex-state = { path = "../state", version = "0.1", optional = true }
+allex-scheduler = { path = "../scheduler", version = "0.1", optional = true }
+allex-keyed-events = { path = "../keyed-events", version = "0.1", optional = true }
+allex-dart-codegen = { path = "../dart-codegen", version = "0.1", optional = true }
+allex-ts-codegen = { path = "../ts-codegen", version = "0.1", optional = true }
+allex-postgres = { path = "../postgres", version = "0.1", optional = true }
+allex-awaitable-map = { path = "../awaitable-map", version = "0.1", optional = true }
+allex-message-templates = { path = "../message-templates", version = "0.1", optional = true }
+allex-mailgunner = { path = "../mailgunner", version = "0.1", optional = true }
+allex-watch-singleton = { path = "../watch-singleton", version = "0.1", optional = true }
+allex-guards = { path = "../guards", version = "0.1", optional = true }
+allex-script = { path = "../script", version = "0.1", optional = true }
+allex-winsvc = { path = "../winsvc", version = "0.1", optional = true }

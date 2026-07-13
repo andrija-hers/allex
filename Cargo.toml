@@ -30,6 +30,7 @@ members = [
     "guards",
     "winsvc",
     "script",
+    "facade",
 ]
 
 [workspace.package]
