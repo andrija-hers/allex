@@ -13,7 +13,7 @@ keywords = ["allex", "cache", "single-flight"]
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures = "0.3"
-progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future", version = "0.1.0" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # `rc` enables Serialize/DeserializeOwned for Arc<T>/Rc<T>, so callers can use a
 # shared value type (e.g. Arc<DataRow>) with the SQLite-backed persistence.

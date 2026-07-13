@@ -22,8 +22,8 @@ async-trait = "0.1"
 jsonwebtoken = "9"
 bcrypt = "0.15"
 uuid = { version = "1", features = ["v4"] }
-message_templates = { path = "../message-templates", package = "allex-message-templates" }
-transport = { path = "../transport", package = "allex-transport" }
-rpc-macro = { path = "../rpc-macro", package = "allex-rpc-macros" }
-execution = { path = "../execution", package = "allex-execution" }
-progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
+message_templates = { path = "../message-templates", package = "allex-message-templates", version = "0.1.0" }
+transport = { path = "../transport", package = "allex-transport", version = "0.1.0" }
+rpc-macro = { path = "../rpc-macro", package = "allex-rpc-macros", version = "0.1.0" }
+execution = { path = "../execution", package = "allex-execution", version = "0.1.0" }
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future", version = "0.1.0" }

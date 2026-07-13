@@ -15,9 +15,9 @@ name = "allex_identity_sqlite"
 path = "./lib.rs"
 
 [dependencies]
-identity = { path = "../identity", package = "allex-identity" }
-message_templates = { path = "../message-templates", package = "allex-message-templates" }
-transport = { path = "../transport", package = "allex-transport" }
+identity = { path = "../identity", package = "allex-identity", version = "0.1.0" }
+message_templates = { path = "../message-templates", package = "allex-message-templates", version = "0.1.0" }
+transport = { path = "../transport", package = "allex-transport", version = "0.1.0" }
 bcrypt = "0.15"
 jsonwebtoken = "9"
 rusqlite = { version = "0.32", features = ["bundled"] }

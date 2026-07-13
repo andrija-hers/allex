@@ -15,7 +15,7 @@ path = "./lib.rs"
 
 [dependencies]
 allex-state-macro = { path = "../state-macro", version = "0.1.0" }
-progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
+progressable-future = { path = "../progressable-future", package = "allex-progressable-future", version = "0.1.0" }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1", features = ["derive"] }
