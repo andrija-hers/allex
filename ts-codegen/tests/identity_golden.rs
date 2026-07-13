@@ -32,8 +32,8 @@ fn generate() -> (String, String) {
     let mut modules = Vec::new();
     let mut all_dtos = Vec::new();
     for path in &sources {
-        let src = fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let src =
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         modules.extend(find_rpc_modules(&src));
         all_dtos.extend(find_dto_types(&src));
     }
@@ -56,8 +56,8 @@ fn assert_golden(name: &str, actual: &str) {
         fs::write(&path, actual).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
         return;
     }
-    let expected = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read golden {}: {e}", path.display()));
+    let expected =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden {}: {e}", path.display()));
     assert_eq!(
         actual, expected,
         "generated {name} differs from tests/golden/{name}; \
@@ -77,5 +77,8 @@ fn identity_client_matches_golden() {
             "generated client is missing the {method} method"
         );
     }
-    assert!(dtos.contains("refresh_token"), "TokenResponse must map refresh_token");
+    assert!(
+        dtos.contains("refresh_token"),
+        "TokenResponse must map refresh_token"
+    );
 }

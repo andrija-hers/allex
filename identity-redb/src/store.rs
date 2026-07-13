@@ -118,9 +118,7 @@ impl RedbIdentityStore {
     ) -> Result<(), TemplateError> {
         let database = self.database.clone();
         tokio::task::spawn_blocking(move || -> Result<(), TemplateError> {
-            let write_tx = database
-                .begin_write()
-                .map_err(template_storage_err)?;
+            let write_tx = database.begin_write().map_err(template_storage_err)?;
             {
                 let mut table = write_tx
                     .open_table(MESSAGE_TEMPLATES_TABLE)
@@ -146,9 +144,7 @@ impl RedbIdentityStore {
         let database = self.database.clone();
         let key = format!("{}:{}", req.template_key, req.channel.as_str());
         let body = tokio::task::spawn_blocking(move || -> Result<String, TemplateError> {
-            let read_tx = database
-                .begin_read()
-                .map_err(template_storage_err)?;
+            let read_tx = database.begin_read().map_err(template_storage_err)?;
             let table = read_tx
                 .open_table(MESSAGE_TEMPLATES_TABLE)
                 .map_err(template_storage_err)?;
@@ -156,8 +152,7 @@ impl RedbIdentityStore {
                 .get(key.as_str())
                 .map_err(template_storage_err)?
                 .ok_or(TemplateError::NotFound)?;
-            String::from_utf8(value.value().to_vec())
-                .map_err(template_storage_err)
+            String::from_utf8(value.value().to_vec()).map_err(template_storage_err)
         })
         .await
         .map_err(|e| TemplateError::Storage(e.to_string()))??;
@@ -548,11 +543,12 @@ impl AccountStore for RedbIdentityStore {
     async fn verify_password(&self, handle: &str, password: &str) -> Result<bool, IdentityError> {
         let db = self.database.clone();
         let handle = handle.to_owned();
-        let stored = tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
-            read_user_sync(&db, &handle)
-        })
-        .await
-        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+        let stored =
+            tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
+                read_user_sync(&db, &handle)
+            })
+            .await
+            .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
         let Some(stored) = stored else {
             return Ok(false); // unknown handle — do not leak existence
@@ -613,11 +609,12 @@ impl AccountStore for RedbIdentityStore {
     async fn get_account(&self, handle: &str) -> Result<Option<AccountRecord>, IdentityError> {
         let db = self.database.clone();
         let handle_owned = handle.to_owned();
-        let stored = tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
-            read_user_sync(&db, &handle_owned)
-        })
-        .await
-        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+        let stored =
+            tokio::task::spawn_blocking(move || -> Result<Option<StoredUser>, IdentityError> {
+                read_user_sync(&db, &handle_owned)
+            })
+            .await
+            .map_err(|e| IdentityError::Internal(e.to_string()))??;
         Ok(stored.map(|u| AccountRecord {
             handle: handle.to_owned(),
             role: u.role,

@@ -61,11 +61,11 @@ mod registration_guard;
 pub use registration_guard::*;
 mod store;
 pub use store::*;
+mod credential_store;
 /// Reusable JWT engine (issue/validate access & refresh tokens, optional opaque
 /// per-user profile claims). Previously an orphan file; wired in so custom
 /// stores can share it instead of each re-deriving JWT plumbing.
 pub mod tokens;
-mod credential_store;
 pub use credential_store::*;
 
 use rpc_macro::rpc_module;

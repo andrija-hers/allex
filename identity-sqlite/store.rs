@@ -463,18 +463,19 @@ impl AccountStore for SqliteIdentityStore {
     async fn verify_password(&self, handle: &str, password: &str) -> Result<bool, IdentityError> {
         let store = self.clone();
         let handle = handle.to_owned();
-        let stored_hash = tokio::task::spawn_blocking(move || -> Result<Option<String>, IdentityError> {
-            let conn = store.open_conn()?;
-            conn.query_row(
-                "SELECT password_hash FROM users WHERE handle = ?1",
-                params![handle],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_err)
-        })
-        .await
-        .map_err(|e| IdentityError::Internal(e.to_string()))??;
+        let stored_hash =
+            tokio::task::spawn_blocking(move || -> Result<Option<String>, IdentityError> {
+                let conn = store.open_conn()?;
+                conn.query_row(
+                    "SELECT password_hash FROM users WHERE handle = ?1",
+                    params![handle],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_err)
+            })
+            .await
+            .map_err(|e| IdentityError::Internal(e.to_string()))??;
 
         let Some(stored_hash) = stored_hash else {
             return Ok(false); // unknown handle — do not leak existence

@@ -132,8 +132,10 @@ impl<C: UnaryCodec + Send + Sync + 'static> ServiceHost<C> {
     pub fn into_router(self) -> RpcService {
         let transport = AxumTransport::<C>::new(self.buffer);
         let router = transport.router();
-        let dispatch =
-            tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(transport, self.registry));
+        let dispatch = tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(
+            transport,
+            self.registry,
+        ));
         RpcService { router, dispatch }
     }
 
@@ -143,8 +145,10 @@ impl<C: UnaryCodec + Send + Sync + 'static> ServiceHost<C> {
     pub fn into_router_with_auth(self, validator: Arc<dyn BearerTokenValidator>) -> RpcService {
         let transport = AxumTransport::<C>::new(self.buffer);
         let router = transport.router_with_auth(validator);
-        let dispatch =
-            tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(transport, self.registry));
+        let dispatch = tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(
+            transport,
+            self.registry,
+        ));
         RpcService { router, dispatch }
     }
 }

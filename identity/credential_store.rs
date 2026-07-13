@@ -142,10 +142,7 @@ impl<B: CredentialBackend> CredentialStore<B> {
     }
 
     /// Authenticates a credential payload and returns a fresh token pair.
-    pub async fn login(
-        &self,
-        credentials: B::Credentials,
-    ) -> Result<TokenResponse, IdentityError> {
+    pub async fn login(&self, credentials: B::Credentials) -> Result<TokenResponse, IdentityError> {
         let user = self
             .inner
             .backend
@@ -231,7 +228,10 @@ impl<B: CredentialBackend> BearerTokenValidator for CredentialStore<B> {
         let v = tokens::validate_access_token(&self.inner.secret, token).ok()?;
         Some(match v.profile {
             Some(profile) => {
-                format!("{}{CALLER_FIELD_SEP}{}{CALLER_FIELD_SEP}{}", v.handle, v.role, profile)
+                format!(
+                    "{}{CALLER_FIELD_SEP}{}{CALLER_FIELD_SEP}{}",
+                    v.handle, v.role, profile
+                )
             }
             None => format!("{}{CALLER_FIELD_SEP}{}", v.handle, v.role),
         })
@@ -262,7 +262,11 @@ mod tests {
         async fn set(&self, handle: &str, password: &str, role: &str, profile: Option<&str>) {
             self.users.lock().await.insert(
                 handle.to_owned(),
-                (password.to_owned(), role.to_owned(), profile.map(str::to_owned)),
+                (
+                    password.to_owned(),
+                    role.to_owned(),
+                    profile.map(str::to_owned),
+                ),
             );
         }
     }
@@ -280,13 +284,15 @@ mod tests {
             credentials: Creds,
         ) -> Result<Option<AuthenticatedUser>, IdentityError> {
             let users = self.users.lock().await;
-            Ok(users.get(&credentials.handle).and_then(|(pw, role, profile)| {
-                (*pw == credentials.password).then(|| AuthenticatedUser {
-                    handle: credentials.handle.clone(),
-                    role: role.clone(),
-                    profile: profile.clone(),
-                })
-            }))
+            Ok(users
+                .get(&credentials.handle)
+                .and_then(|(pw, role, profile)| {
+                    (*pw == credentials.password).then(|| AuthenticatedUser {
+                        handle: credentials.handle.clone(),
+                        role: role.clone(),
+                        profile: profile.clone(),
+                    })
+                }))
         }
 
         async fn resolve_user(
@@ -294,11 +300,13 @@ mod tests {
             handle: &str,
         ) -> Result<Option<AuthenticatedUser>, IdentityError> {
             let users = self.users.lock().await;
-            Ok(users.get(handle).map(|(_, role, profile)| AuthenticatedUser {
-                handle: handle.to_owned(),
-                role: role.clone(),
-                profile: profile.clone(),
-            }))
+            Ok(users
+                .get(handle)
+                .map(|(_, role, profile)| AuthenticatedUser {
+                    handle: handle.to_owned(),
+                    role: role.clone(),
+                    profile: profile.clone(),
+                }))
         }
     }
 
@@ -312,7 +320,10 @@ mod tests {
         backend.set("alice", "pw", "user", None).await;
         let s = store(backend);
         let err = s
-            .login(Creds { handle: "alice".into(), password: "wrong".into() })
+            .login(Creds {
+                handle: "alice".into(),
+                password: "wrong".into(),
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, IdentityError::InvalidCredentials));
@@ -326,7 +337,10 @@ mod tests {
             .await;
         let s = store(backend);
         let resp = s
-            .login(Creds { handle: "alice".into(), password: "pw".into() })
+            .login(Creds {
+                handle: "alice".into(),
+                password: "pw".into(),
+            })
             .await
             .unwrap();
         let caller = s.validate_bearer(&resp.token).unwrap();
@@ -344,7 +358,10 @@ mod tests {
             .await;
         let s = store(backend.clone());
         let resp = s
-            .login(Creds { handle: "alice".into(), password: "pw".into() })
+            .login(Creds {
+                handle: "alice".into(),
+                password: "pw".into(),
+            })
             .await
             .unwrap();
 
@@ -354,7 +371,10 @@ mod tests {
             .await;
 
         // Refresh re-resolves — the new access token carries the fresh profile.
-        let refreshed = s.refresh(resp.refresh_token.as_deref().unwrap()).await.unwrap();
+        let refreshed = s
+            .refresh(resp.refresh_token.as_deref().unwrap())
+            .await
+            .unwrap();
         let caller = s.validate_bearer(&refreshed.token).unwrap();
         assert!(caller.ends_with(r#"{"r_admin":true}"#), "got: {caller}");
     }
@@ -365,7 +385,10 @@ mod tests {
         backend.set("alice", "pw", "user", None).await;
         let s = store(backend);
         let resp = s
-            .login(Creds { handle: "alice".into(), password: "pw".into() })
+            .login(Creds {
+                handle: "alice".into(),
+                password: "pw".into(),
+            })
             .await
             .unwrap();
         let first_rt = resp.refresh_token.unwrap();
@@ -383,11 +406,15 @@ mod tests {
         backend.set("alice", "pw", "user", None).await;
         let s = store(backend);
         let resp = s
-            .login(Creds { handle: "alice".into(), password: "pw".into() })
+            .login(Creds {
+                handle: "alice".into(),
+                password: "pw".into(),
+            })
             .await
             .unwrap();
         assert!(s.validate_bearer(&resp.token).is_some());
-        s.logout(Some(&resp.token), resp.refresh_token.as_deref()).await;
+        s.logout(Some(&resp.token), resp.refresh_token.as_deref())
+            .await;
         assert!(s.validate_bearer(&resp.token).is_none());
     }
 }

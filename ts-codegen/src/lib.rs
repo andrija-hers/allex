@@ -1443,7 +1443,10 @@ mod tests {
         let out = render_dtos(&dtos);
         // Defaulted, non-nullable fields fall back to the type default on an absent/null key.
         assert!(out.contains(") ?? [],"), "tags decode fallback: {out}");
-        assert!(out.contains(") ?? 0,"), "count decode fallback (default = path also honored): {out}");
+        assert!(
+            out.contains(") ?? 0,"),
+            "count decode fallback (default = path also honored): {out}"
+        );
         // The non-defaulted field keeps its plain decode (no `??`).
         assert!(
             out.contains("id: json[\"id\"] as string,"),

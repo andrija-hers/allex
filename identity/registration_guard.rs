@@ -168,8 +168,10 @@ mod tests {
 
     #[tokio::test]
     async fn allow_roles_accepts_listed_and_rejects_others() {
-        let guard =
-            RegistrationGuard::allow_roles(InMemoryIdentityStore::new("secret"), ["user", "seller"]);
+        let guard = RegistrationGuard::allow_roles(
+            InMemoryIdentityStore::new("secret"),
+            ["user", "seller"],
+        );
         assert!(
             guard
                 .register(RegisterRequest {

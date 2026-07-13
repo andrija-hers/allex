@@ -248,7 +248,8 @@ mod tests {
     #[test]
     fn access_token_profile_round_trips_opaquely() {
         let profile = r#"{"r_admin":true,"r_backdate":false}"#;
-        let token = issue_access_token_with_profile(SECRET, "alice", "user", Some(profile)).unwrap();
+        let token =
+            issue_access_token_with_profile(SECRET, "alice", "user", Some(profile)).unwrap();
         let v = validate_access_token(SECRET, &token).unwrap();
         assert_eq!(v.handle, "alice");
         assert_eq!(v.role, "user");
@@ -259,10 +260,12 @@ mod tests {
     #[test]
     fn token_response_with_profile_puts_profile_in_access_not_refresh() {
         let profile = r#"{"r_admin":true}"#;
-        let resp =
-            issue_token_response_with_profile(SECRET, "bob", "user", Some(profile)).unwrap();
+        let resp = issue_token_response_with_profile(SECRET, "bob", "user", Some(profile)).unwrap();
         assert_eq!(
-            validate_access_token(SECRET, &resp.token).unwrap().profile.as_deref(),
+            validate_access_token(SECRET, &resp.token)
+                .unwrap()
+                .profile
+                .as_deref(),
             Some(profile)
         );
         // The refresh token intentionally carries no profile — re-resolve on refresh.

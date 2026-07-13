@@ -426,10 +426,8 @@ mod platform {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(|kb| kb * 1024)
         };
-        let total = kb("MemTotal:")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "MemTotal missing"))?;
-        let avail = kb("MemAvailable:")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "MemAvailable missing"))?;
+        let total = kb("MemTotal:").ok_or_else(|| io::Error::other("MemTotal missing"))?;
+        let avail = kb("MemAvailable:").ok_or_else(|| io::Error::other("MemAvailable missing"))?;
         Ok((avail, total))
     }
 
@@ -440,7 +438,7 @@ mod platform {
             .split_whitespace()
             .nth(1)
             .and_then(|v| v.parse().ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "statm resident missing"))?;
+            .ok_or_else(|| io::Error::other("statm resident missing"))?;
         // SAFETY: sysconf with a static argument is always safe.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
         Ok(resident.saturating_mul(page))

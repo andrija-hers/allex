@@ -324,8 +324,11 @@ enum PendingWaitOutcome<K, V> {
     },
 }
 
+/// A batch of per-key `watch` receivers awaiting their pending fetch results.
+type PendingWaiters<K, V> = Vec<(K, u64, watch::Receiver<Option<Arc<V>>>)>;
+
 async fn wait_for_pending_values<K, V>(
-    pending_waiters: Vec<(K, u64, watch::Receiver<Option<Arc<V>>>)>,
+    pending_waiters: PendingWaiters<K, V>,
 ) -> Vec<PendingWaitOutcome<K, V>>
 where
     V: Clone,
@@ -518,7 +521,7 @@ where
             // Split remaining into pending waiters and truly unknown — done
             // entirely before any await so no RefCell borrow is held across a
             // yield point.
-            let mut pending_waiters: Vec<(K, u64, watch::Receiver<Option<Arc<V>>>)> = Vec::new();
+            let mut pending_waiters: PendingWaiters<K, V> = Vec::new();
             let mut truly_unknown: Vec<K> = Vec::new();
             {
                 let pending = self.pending.lock().unwrap();
@@ -659,7 +662,7 @@ where
             .collect();
 
         while !remaining.is_empty() {
-            let mut pending_waiters: Vec<(K, u64, watch::Receiver<Option<Arc<V>>>)> = Vec::new();
+            let mut pending_waiters: PendingWaiters<K, V> = Vec::new();
             let mut truly_unknown: Vec<K> = Vec::new();
             {
                 let pending = self.pending.lock().unwrap();

@@ -492,9 +492,7 @@ mod account_store_tests {
         let refresh_token = session.refresh_token.clone().unwrap();
         store.revoke_sessions("erin").await.unwrap();
         assert!(matches!(
-            store
-                .refresh(RefreshRequest { refresh_token })
-                .await,
+            store.refresh(RefreshRequest { refresh_token }).await,
             Err(IdentityError::InvalidRefreshToken)
         ));
     }

@@ -2323,11 +2323,20 @@ mod tests {
         );
         let out = render_dart_dtos("shared", &dtos, &[]);
         // Defaulted fields become optional constructor params with the type's default …
-        assert!(out.contains("this.tags = const [],"), "tags default:\n{out}");
+        assert!(
+            out.contains("this.tags = const [],"),
+            "tags default:\n{out}"
+        );
         assert!(out.contains("this.count = 0,"), "count default:\n{out}");
-        assert!(out.contains("required this.id,"), "non-default field stays required:\n{out}");
+        assert!(
+            out.contains("required this.id,"),
+            "non-default field stays required:\n{out}"
+        );
         // … and their decode tolerates an absent/null key, falling back to the default.
-        assert!(out.contains(") ?? const [],"), "tags decode fallback:\n{out}");
+        assert!(
+            out.contains(") ?? const [],"),
+            "tags decode fallback:\n{out}"
+        );
         assert!(out.contains(") ?? 0,"), "count decode fallback:\n{out}");
     }
 
@@ -2346,7 +2355,10 @@ mod tests {
             "StepsMade",
             "ArithmeticError",
         ] {
-            assert!(names.contains(&expected), "missing DTO {expected} in {names:?}");
+            assert!(
+                names.contains(&expected),
+                "missing DTO {expected} in {names:?}"
+            );
         }
     }
 
