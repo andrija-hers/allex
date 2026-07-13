@@ -24,6 +24,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "allex"
+version = "0.1.0"
+dependencies = [
+ "allex-awaitable-map",
+ "allex-dart-codegen",
+ "allex-execution",
+ "allex-guards",
+ "allex-host",
+ "allex-identity",
+ "allex-identity-postgres",
+ "allex-identity-redb",
+ "allex-identity-sqlite",
+ "allex-keyed-events",
+ "allex-mailgunner",
+ "allex-message-templates",
+ "allex-postgres",
+ "allex-progressable-future",
+ "allex-rpc-macros",
+ "allex-scheduler",
+ "allex-script",
+ "allex-serve",
+ "allex-state",
+ "allex-transport",
+ "allex-ts-codegen",
+ "allex-watch-singleton",
+ "allex-winsvc",
+]
+
+[[package]]
 name = "allex-awaitable-map"
 version = "0.1.0"
 dependencies = [
