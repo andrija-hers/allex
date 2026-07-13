@@ -1,9 +1,18 @@
 [package]
 name = "allex-progressable-future"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-description = "ProgressableFuture: a future that emits progress updates before completing."
+description = "ProgressableFuture: a future that emits progress updates before completing; substrate for allex streaming RPC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "future", "streaming", "async"]
+
+[package.metadata.docs.rs]
+# Document all feature-gated items (default = std; also alloc).
+all-features = true
 
 [lib]
 name = "progressable_future"

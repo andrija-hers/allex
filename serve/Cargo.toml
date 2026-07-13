@@ -1,7 +1,14 @@
 [package]
 name = "allex-serve"
-version = "0.1.0"
-edition = "2024"
+description = "Transport-agnostic request dispatch loop plus the per-request caller context (handle/role/profile) for allex services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "rpc", "serve"]
 
 [lib]
 name = "allex_serve"

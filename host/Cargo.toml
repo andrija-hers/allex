@@ -1,7 +1,14 @@
 [package]
 name = "allex-host"
-version = "0.1.0"
-edition = "2024"
+description = "Batteries-included axum host builder (ServiceHost) wiring registry, transport, and dispatch, plus startup bootstrap helpers, for allex backends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "rpc", "axum", "host"]
 
 [lib]
 name = "allex_host"

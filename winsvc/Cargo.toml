@@ -1,7 +1,19 @@
 [package]
 name = "allex-winsvc"
-version = "0.1.0"
-edition = "2024"
+description = "Thin Windows-service host harness for allex backends (Windows-only; an empty crate elsewhere so it can be depended on unconditionally)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "windows", "service"]
+
+[package.metadata.docs.rs]
+# Windows-only crate; build its docs on the Windows target so they aren't empty.
+default-target = "x86_64-pc-windows-msvc"
+targets = []
 
 [lib]
 name = "allex_winsvc"

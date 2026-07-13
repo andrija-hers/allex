@@ -1,7 +1,14 @@
 [package]
 name = "allex-guards"
-version = "0.1.0"
-edition = "2024"
+description = "Disk/RAM headroom watchdog (gauges with hysteresis) for fire-and-forget allex services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "guard", "watchdog"]
 
 [lib]
 name = "allex_guards"

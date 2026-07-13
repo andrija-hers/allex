@@ -1,9 +1,14 @@
 [package]
 name = "allex-awaitable-map"
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
 description = "Keyed awaitable fetch-coalescing cache: single-flight dedup, pluggable (SQLite) persistence, failure cooldown, progress streaming."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "cache", "single-flight"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }

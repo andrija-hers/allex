@@ -1,7 +1,14 @@
 [package]
 name = "allex-identity-redb"
-version = "0.1.0"
-edition = "2024"
+description = "redb-backed identity store for allex: bcrypt credentials, sessions, and bearer-token validation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "identity", "redb", "auth"]
 
 [lib]
 name = "allex_identity_redb"

@@ -1,14 +1,21 @@
 [package]
 name = "allex-postgres"
-version = "0.1.0"
-edition = "2024"
+description = "Pooled Postgres access (deadpool) with a FromRow derive for allex services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "postgres", "deadpool"]
 
 [lib]
 name = "allex_postgres"
 path = "./lib.rs"
 
 [dependencies]
-allex-postgres-macros = { path = "../postgres-macros" }
+allex-postgres-macros = { path = "../postgres-macros", version = "0.1.0" }
 deadpool = "0.10"
 deadpool-postgres = { version = "0.11", features = ["rt_tokio_1"] }
 tokio-postgres = "0.7"

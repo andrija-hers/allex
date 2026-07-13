@@ -1,7 +1,14 @@
 [package]
 name = "allex-message-templates"
-version = "0.1.0"
-edition = "2024"
+description = "Stored message templates with Tera rendering: pure contract types plus a render helper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "templates", "tera", "email"]
 
 [lib]
 path = "./lib.rs"

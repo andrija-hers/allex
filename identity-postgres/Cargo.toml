@@ -1,14 +1,21 @@
 [package]
 name = "allex-identity-postgres"
-version = "0.1.0"
-edition = "2024"
+description = "Postgres-backed identity store for allex: bcrypt credentials, sessions, and bearer-token validation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "identity", "postgres", "auth"]
 
 [lib]
 name = "allex_identity_postgres"
 path = "./lib.rs"
 
 [dependencies]
-allex-postgres = { path = "../postgres" }
+allex-postgres = { path = "../postgres", version = "0.1.0" }
 identity = { path = "../identity", package = "allex-identity" }
 message_templates = { path = "../message-templates", package = "allex-message-templates" }
 transport = { path = "../transport", package = "allex-transport" }

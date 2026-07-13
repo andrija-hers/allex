@@ -1,7 +1,14 @@
 [package]
 name = "allex-postgres-macros"
-version = "0.1.0"
-edition = "2024"
+description = "FromRow derive macro backing allex-postgres."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "postgres", "macro", "derive"]
 
 [lib]
 name = "allex_postgres_macros"

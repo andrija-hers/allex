@@ -1,7 +1,14 @@
 [package]
 name = "allex-identity"
-version = "0.1.0"
-edition = "2024"
+description = "IdentityV1 service, JWT token engine, and pluggable credential/account store seams (login, refresh, sessions, registration guard) for allex."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "identity", "auth", "jwt"]
 
 [lib]
 path = "./lib.rs"

@@ -1,13 +1,20 @@
 [package]
 name = "allex-state"
-version = "0.1.0"
-edition = "2024"
+description = "LocalState snapshot-plus-delta streams for allex services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "state", "streaming"]
 
 [lib]
 path = "./lib.rs"
 
 [dependencies]
-allex-state-macro = { path = "../state-macro" }
+allex-state-macro = { path = "../state-macro", version = "0.1.0" }
 progressable-future = { path = "../progressable-future", package = "allex-progressable-future" }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

@@ -31,3 +31,15 @@ members = [
     "winsvc",
     "script",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = [
+    "Andrija Petrović <andrija.hers@gmail.com>",
+    "Luka Petrović <lukapetrovicsi@gmail.com>",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://codeberg.org/andrija/allex"
+homepage = "https://codeberg.org/andrija/allex"

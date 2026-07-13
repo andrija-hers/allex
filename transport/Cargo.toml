@@ -1,7 +1,14 @@
 [package]
 name = "allex-transport"
-version = "0.1.0"
-edition = "2024"
+description = "Wire types, codecs, and transports (axum, reqwest, websocket, signalr) for allex RPC, with the error-to-HTTP-status mapping and bearer-token seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "rpc", "transport", "axum"]
 
 [lib]
 path = "./lib.rs"

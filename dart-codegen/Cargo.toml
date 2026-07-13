@@ -1,7 +1,14 @@
 [package]
 name = "allex-dart-codegen"
-version = "0.1.0"
-edition = "2024"
+description = "Generate a typed Dart client from an allex `#[rpc_module]` Rust source, byte-compatible with the serde JSON wire format."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "codegen", "dart", "rpc"]
 
 [dependencies]
 syn = { version = "2", features = ["full"] }

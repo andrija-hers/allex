@@ -1,7 +1,14 @@
 [package]
 name = "allex-execution"
-version = "0.1.0"
-edition = "2024"
+description = "Registry and dispatch traits (unary and streaming) that route allex RPC method calls to their handlers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["allex", "rpc", "dispatch"]
 
 [lib]
 path = "./lib.rs"
