@@ -1,0 +1,29 @@
+# Woodpecker CI for Codeberg — https://woodpecker-ci.org
+# Gates every push and pull request on format, lints, and tests.
+#
+# The pinned toolchain (1.97) equals allex's current MSRV (rust-version in
+# Cargo.toml), so this whole pipeline doubles as the MSRV gate. If the MSRV is
+# later minimized below the toolchain used for fmt/clippy/test, add a separate
+# `msrv` step pinned at the declared floor.
+when:
+  - event: [push, pull_request]
+
+steps:
+  fmt:
+    image: rust:1.97
+    commands:
+      - rustup component add rustfmt
+      - cargo fmt --all --check
+
+  clippy:
+    image: rust:1.97
+    commands:
+      - rustup component add clippy
+      - cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    image: rust:1.97
+    commands:
+      # allex-postgres / allex-identity-postgres integration tests need Docker
+      # (testcontainers) and are excluded here; run them locally with Docker up.
+      - cargo test --workspace --exclude allex-postgres --exclude allex-identity-postgres
