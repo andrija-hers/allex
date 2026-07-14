@@ -34,8 +34,12 @@ Declare the contract:
 ```rust
 use allex_rpc_macros::rpc_module; // #[public] / #[allowed_roles] are inner attributes of #[rpc_module]
 
+// Types crossing the wire are `pub` and (de)serializable.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum CounterError { Overflow }
+
 #[rpc_module]
-trait CounterV1 {
+pub trait CounterV1 {
     #[public]
     fn get(&self) -> impl Future<Output = Result<u64, CounterError>> + Send;
 
@@ -43,6 +47,24 @@ trait CounterV1 {
     fn increment(&self, by: u64) -> impl Future<Output = Result<u64, CounterError>> + Send;
 }
 ```
+
+`#[rpc_module]` generates code that references the contract crates **by bare name**,
+so a contract crate must depend on them under those names (as the arithmetic
+example does):
+
+```toml
+[dependencies]
+allex-rpc-macros = "0.1"
+transport = { package = "allex-transport", version = "0.1" }
+execution = { package = "allex-execution", version = "0.1" }
+progressable-future = { package = "allex-progressable-future", version = "0.1" }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+```
+
+> Making `#[rpc_module]` work from a single `allex` dependency (macro path-hygiene)
+> is planned for **0.2.0**; until then the aliased deps above are required.
 
 Stand it up as an axum service:
 

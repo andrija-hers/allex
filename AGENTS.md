@@ -215,10 +215,16 @@ Learned while building this; ignore at your peril.
 
 ## Build-template checklist for a new service
 
-1. **`*-contract` crate** — depend on `rpc-macro`, `transport`, `execution`,
-   `progressable-future`. Declare your `#[rpc_module]` traits; annotate methods
-   `#[public]` / `#[allowed_roles("…")]`. This crate is also the dart/ts-codegen
-   source.
+1. **`*-contract` crate** — declare your `#[rpc_module]` traits; annotate methods
+   `#[public]` / `#[allowed_roles("…")]`; wire types (requests/responses/errors)
+   must be `pub` + `Serialize`/`Deserialize`. **`#[rpc_module]` generates code that
+   references its deps by *bare name*, so depend on them under exactly those
+   names**: `allex-rpc-macros`, `transport` (`package = "allex-transport"`),
+   `execution` (`allex-execution`), `progressable-future`
+   (`allex-progressable-future`), plus `async-trait`, `futures`, and `serde`. This
+   crate is also the dart/ts-codegen source. *(Known limitation: the bare-name
+   requirement — macro path-hygiene, so a single `allex` dep suffices — is planned
+   for **0.2.0**; see the smoke-test finding.)*
 2. **`*-api` crate** — depend on `identity`, `transport`, `execution`, `host`.
    Implement your traits; expose a builder that registers the generated responders
    into an `allex_host::ServiceHost` (below). Don't hand-write the `Registry` +

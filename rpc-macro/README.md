@@ -21,8 +21,11 @@ check.
 ```rust
 use allex_rpc_macros::rpc_module; // #[public] / #[allowed_roles] are inner attributes of #[rpc_module]
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum CounterError { Overflow }
+
 #[rpc_module]
-trait CounterV1 {
+pub trait CounterV1 {
     #[public]
     fn get(&self) -> impl Future<Output = Result<u64, CounterError>> + Send;
 
@@ -30,6 +33,26 @@ trait CounterV1 {
     fn increment(&self, by: u64) -> impl Future<Output = Result<u64, CounterError>> + Send;
 }
 ```
+
+## Required dependencies
+
+The generated code references the contract crates **by bare name**, so a crate that
+uses `#[rpc_module]` must depend on them under exactly these names:
+
+```toml
+[dependencies]
+allex-rpc-macros = "0.1"
+transport = { package = "allex-transport", version = "0.1" }
+execution = { package = "allex-execution", version = "0.1" }
+progressable-future = { package = "allex-progressable-future", version = "0.1" }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+```
+
+Types crossing the wire (requests, responses, errors) must be `pub` and implement
+`Serialize` / `Deserialize`. (Removing the need for these aliases — making the
+macro emit self-contained paths — is planned for **0.2.0**.)
 
 ## Docs & license
 
