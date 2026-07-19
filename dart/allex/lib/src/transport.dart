@@ -32,20 +32,53 @@ class AllexAuthFailure {
 /// Streaming responses are newline-delimited; each frame is a JSON object
 /// with exactly one of the keys `"Progress"`, `"Success"`, or `"Error"`,
 /// whose value is a double-wrapped payload following the same byte encoding.
+/// Called with the server's clock reading (UTC) parsed from an HTTP `Date`
+/// response header, on every response. Lets a consumer correct for device-clock
+/// skew so time-based UI decisions match the server. Optional and additive —
+/// when null the transport behaves exactly as before.
+typedef AllexServerTimeObserver = void Function(DateTime serverUtc);
+
 class AllexTransport {
   final Uri baseUri;
   final AllexBearerTokenProvider? bearerToken;
   final AllexBearerTokenRefresher? refreshBearerToken;
+  final AllexServerTimeObserver? onServerTime;
   final http.Client _client;
 
   AllexTransport({
     required this.baseUri,
     this.bearerToken,
     this.refreshBearerToken,
+    this.onServerTime,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
   void dispose() => _client.close();
+
+  /// Reports the server's clock from a response's `Date` header (RFC 1123, e.g.
+  /// `Wed, 21 Oct 2015 07:28:00 GMT`), if present and parseable. Web-safe (no
+  /// `dart:io`). Never throws — a missing/odd header is simply ignored.
+  void _noteServerTime(Map<String, String> headers) {
+    final observer = onServerTime;
+    if (observer == null) return;
+    final raw = headers['date'];
+    if (raw == null) return;
+    final m = RegExp(
+      r'^[A-Za-z]{3}, (\d{2}) ([A-Za-z]{3}) (\d{4}) '
+      r'(\d{2}):(\d{2}):(\d{2}) GMT$',
+    ).firstMatch(raw.trim());
+    if (m == null) return;
+    const months = {
+      'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+      'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+    };
+    final month = months[m.group(2)];
+    if (month == null) return;
+    observer(DateTime.utc(
+      int.parse(m.group(3)!), month, int.parse(m.group(1)!),
+      int.parse(m.group(4)!), int.parse(m.group(5)!), int.parse(m.group(6)!),
+    ));
+  }
 
   Future<AllexResult<T, E>> callUnary<T, E>({
     required String module,
@@ -59,6 +92,7 @@ class AllexTransport {
       method: method,
       body: _encodeRpcCall(module, method, request),
     );
+    _noteServerTime(response.headers);
 
     if (response.statusCode == 200) {
       return Ok(decode(_decodePayload(response.body)));
@@ -95,6 +129,7 @@ class AllexTransport {
             method: method,
             body: _encodeRpcCall(module, method, request),
           );
+          _noteServerTime(streamed.headers);
 
           if (streamed.statusCode != 200) {
             throw AllexError(
@@ -173,6 +208,7 @@ class AllexTransport {
       method: method,
       body: _encodeRpcCall(module, method, request),
     );
+    _noteServerTime(streamed.headers);
 
     if (streamed.statusCode != 200) {
       throw AllexError(

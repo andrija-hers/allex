@@ -172,6 +172,66 @@ void main() {
       expect(authHeaders, ['Bearer old-token', 'Bearer new-token']);
       expect((result as Ok<_AddResult, String>).value.r, 9);
     });
+
+    test('reports the server clock from the response Date header', () async {
+      DateTime? observed;
+      final client = _QueueClient([
+        (_) async => _textResponse(
+              200,
+              _wrap({'r': 1}),
+              headers: const {
+                'content-type': 'application/json',
+                'date': 'Wed, 21 Oct 2015 07:28:00 GMT',
+              },
+            ),
+      ]);
+      final transport = AllexTransport(
+        baseUri: Uri.parse('http://localhost/rpc'),
+        onServerTime: (t) => observed = t,
+        client: client,
+      );
+
+      await transport.callUnary<_AddResult, String>(
+        module: 'arithmetic_v_1',
+        method: 'add',
+        request: {'a': 0, 'b': 1},
+        decode: _AddResult.fromJson,
+        decodeError: (json) => json as String,
+      );
+
+      expect(observed, isNotNull);
+      expect(observed!.isUtc, isTrue);
+      expect(observed, DateTime.utc(2015, 10, 21, 7, 28, 0));
+    });
+
+    test('ignores a missing or unparseable Date header', () async {
+      var calls = 0;
+      final client = _QueueClient([
+        (_) async => _textResponse(200, _wrap({'r': 1})), // no Date header
+        (_) async => _textResponse(
+              200,
+              _wrap({'r': 1}),
+              headers: const {'date': 'not-a-date'},
+            ),
+      ]);
+      final transport = AllexTransport(
+        baseUri: Uri.parse('http://localhost/rpc'),
+        onServerTime: (_) => calls += 1,
+        client: client,
+      );
+
+      for (final _ in [0, 1]) {
+        await transport.callUnary<_AddResult, String>(
+          module: 'arithmetic_v_1',
+          method: 'add',
+          request: {'a': 0, 'b': 1},
+          decode: _AddResult.fromJson,
+          decodeError: (json) => json as String,
+        );
+      }
+
+      expect(calls, 0);
+    });
   });
 
   group('AllexTransport.callStreaming', () {
