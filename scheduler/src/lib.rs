@@ -286,6 +286,11 @@ where
         self.schedules.get(schedule_id)
     }
 
+    /// Iterate every registered schedule. Read-only; order is unspecified.
+    pub fn schedules(&self) -> impl Iterator<Item = &T> {
+        self.schedules.values()
+    }
+
     pub fn processor(&self) -> &P {
         &self.processor
     }
