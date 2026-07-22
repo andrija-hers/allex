@@ -44,3 +44,10 @@ authors = [
 license = "MIT OR Apache-2.0"
 repository = "https://codeberg.org/andrija/allex"
 homepage = "https://codeberg.org/andrija/allex"
+
+[workspace.dependencies]
+# Proc-macro / codegen toolchain, shared by rpc-macro, state-macro,
+# postgres-macros, ts-codegen and dart-codegen. Bump in one place.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }

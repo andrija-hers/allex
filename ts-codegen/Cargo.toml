@@ -11,4 +11,4 @@ homepage.workspace = true
 keywords = ["allex", "codegen", "typescript", "rpc"]
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+syn.workspace = true
