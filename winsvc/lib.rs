@@ -13,7 +13,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub use tokio::sync::Notify;
@@ -22,10 +22,40 @@ use windows_service::service::{
     ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+/// How long we tell the SCM to wait for the body to finish stopping once a Stop/Shutdown is accepted.
+/// The SCM shows the service as *Stopping* for up to this long before it would consider it hung; it is
+/// superseded the moment the body returns and we report `Stopped`. Kept comfortably above the app's own
+/// bounded drain (the app is responsible for not blocking indefinitely) and under the SCM's default
+/// stop timeout so a genuinely wedged body is still surfaced rather than hidden forever.
+const STOP_WAIT_HINT: Duration = Duration::from_secs(20);
+
+/// Post a service-status transition to the SCM. Free-standing so both the main run path and the
+/// control handler (which reports `StopPending` the instant a Stop arrives) can call it.
+fn set_status(
+    handle: &ServiceStatusHandle,
+    state: ServiceState,
+    controls: ServiceControlAccept,
+    exit: ServiceExitCode,
+    checkpoint: u32,
+    wait_hint: Duration,
+) -> windows_service::Result<()> {
+    handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: state,
+        controls_accepted: controls,
+        exit_code: exit,
+        checkpoint,
+        wait_hint,
+        process_id: None,
+    })
+}
 
 /// Identity of the service in the SCM.
 pub struct ServiceSpec {
@@ -81,10 +111,32 @@ where
 {
     let notify = Arc::new(Notify::new());
     let handler_notify = notify.clone();
+    // The control handler needs the status handle to report `StopPending` — but `register` only
+    // returns that handle *after* it has the handler. Break the cycle with a slot the handler reads
+    // and the main path fills right after `register`, before the service is ever marked Running (so
+    // it is always populated by the time the SCM can deliver a Stop).
+    let status_slot: Arc<OnceLock<ServiceStatusHandle>> = Arc::new(OnceLock::new());
+    let handler_slot = status_slot.clone();
     let event_handler = move |control: ServiceControl| -> ServiceControlHandlerResult {
         match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 handler_notify.notify_one();
+                // Acknowledge the stop to the SCM immediately: move to StopPending with a wait hint
+                // and stop accepting further controls. Without this the SCM keeps showing the last
+                // reported state (Running) for the whole time the body drains, so the console reads
+                // as "not stopping" and a second Stop lands as ERROR_SERVICE_CANNOT_ACCEPT_CTRL
+                // (1061) that looks like a wedge. Now the console honestly shows "Stopping" and the
+                // duplicate control is cleanly, understandably rejected.
+                if let Some(handle) = handler_slot.get() {
+                    let _ = set_status(
+                        handle,
+                        ServiceState::StopPending,
+                        ServiceControlAccept::empty(),
+                        ServiceExitCode::Win32(0),
+                        1,
+                        STOP_WAIT_HINT,
+                    );
+                }
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -92,30 +144,31 @@ where
         }
     };
     let status_handle = service_control_handler::register(&spec.name, event_handler)?;
+    // Publish the handle for the control handler before we advertise Running (and thus before any
+    // Stop can arrive). `set` is infallible on OnceLock's first use here.
+    let _ = status_slot.set(status_handle);
 
-    let set = |state: ServiceState, controls: ServiceControlAccept, exit: ServiceExitCode| {
-        status_handle.set_service_status(ServiceStatus {
-            service_type: SERVICE_TYPE,
-            current_state: state,
-            controls_accepted: controls,
-            exit_code: exit,
-            checkpoint: 0,
-            wait_hint: Duration::default(),
-            process_id: None,
-        })
-    };
-
-    set(
+    set_status(
+        &status_handle,
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         ServiceExitCode::Win32(0),
+        0,
+        Duration::default(),
     )?;
 
     let exit = match body(notify) {
         Outcome::Clean => ServiceExitCode::Win32(0),
         Outcome::Failed => ServiceExitCode::ServiceSpecific(1),
     };
-    set(ServiceState::Stopped, ServiceControlAccept::empty(), exit)?;
+    set_status(
+        &status_handle,
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        exit,
+        0,
+        Duration::default(),
+    )?;
     Ok(())
 }
 
