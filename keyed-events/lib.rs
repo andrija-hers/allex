@@ -299,6 +299,42 @@ where
     F: FnOnce(Id) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Vec<E>, Err>> + Send + 'static,
 {
+    replay_and_watch_filtered(hub, key, after, order, |_| true, backlog, on_closed)
+}
+
+/// [`replay_and_watch`] with a per-subscriber visibility filter on **live**
+/// events.
+///
+/// The backlog closure reads from a store and can filter in SQL; live events
+/// arrive straight off the broadcast hub, which is shared by every subscriber to
+/// a key and therefore cannot know what any one of them is allowed to see. That
+/// asymmetry is a trap: a stream can correctly omit something from its replay
+/// and then push the very next one through. `keep` closes it, applying the same
+/// rule to live events that the backlog query applies to stored ones.
+///
+/// Stasera uses this for user blocking — a blocked person's messages must not
+/// appear, and "not until you reload" is not blocking.
+///
+/// `keep` runs on the hub's delivery path, so it should be a cheap in-memory
+/// predicate (a set lookup), not a query.
+pub fn replay_and_watch_filtered<K, E, Id, T, Err, F, Fut>(
+    hub: &Arc<KeyedBroadcastHub<K, E>>,
+    key: K,
+    after: Id,
+    order: impl Fn(&E) -> Id + Send + 'static,
+    keep: impl Fn(&E) -> bool + Send + 'static,
+    backlog: F,
+    on_closed: impl Fn() -> Err + Send + 'static,
+) -> ProgressableFuture<E, T, Err>
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    E: Clone + Send + 'static,
+    Id: Ord + Copy + Send + 'static,
+    T: Send + 'static,
+    Err: Send + 'static,
+    F: FnOnce(Id) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Vec<E>, Err>> + Send + 'static,
+{
     let hub = Arc::clone(hub);
     ProgressableFuture::new(move |sender| async move {
         // Subscribe before the backlog read so nothing published in between is
@@ -319,8 +355,13 @@ where
                 Ok(event) => {
                     let id = order(&event);
                     if id > high {
+                        // Advance the high-water mark even when the event is
+                        // filtered out: it HAS been seen, and leaving the mark
+                        // behind would let a later reconnect replay it.
                         high = id;
-                        sender.progress(event);
+                        if keep(&event) {
+                            sender.progress(event);
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
