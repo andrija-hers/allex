@@ -127,11 +127,37 @@ impl<C> ServiceHost<C> {
     }
 }
 
+/// Gzip for responses that are complete when they are sent — never for the
+/// streaming ones.
+///
+/// A streamed reply (`application/x-ndjson`) is a live channel: a big first
+/// frame, then small deltas whenever something changes. Compressing it holds
+/// those deltas until the encoder has enough input to emit a block — measured
+/// at 300 ms, exactly as long as it took the NEXT frame to appear, which for a
+/// monitoring dashboard means showing stale state. Unary replies have no such
+/// tail, so they compress freely.
+///
+/// `SizeAbove` keeps the encoder off responses too small to gain from it.
+fn compression_layer() -> tower_http::compression::CompressionLayer<
+    tower_http::compression::predicate::And<
+        tower_http::compression::predicate::NotForContentType,
+        tower_http::compression::predicate::SizeAbove,
+    >,
+> {
+    use tower_http::compression::{
+        CompressionLayer,
+        predicate::{NotForContentType, Predicate, SizeAbove},
+    };
+    CompressionLayer::new().compress_when(
+        NotForContentType::const_new("application/x-ndjson").and(SizeAbove::new(1024)),
+    )
+}
+
 impl<C: UnaryCodec + Send + Sync + 'static> ServiceHost<C> {
     /// Builds an **anonymous** (`POST /rpc`, no auth) router and spawns its dispatch loop.
     pub fn into_router(self) -> RpcService {
         let transport = AxumTransport::<C>::new(self.buffer);
-        let router = transport.router();
+        let router = transport.router().layer(compression_layer());
         let dispatch = tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(
             transport,
             self.registry,
@@ -144,7 +170,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> ServiceHost<C> {
     /// [`BearerTokenValidator`].
     pub fn into_router_with_auth(self, validator: Arc<dyn BearerTokenValidator>) -> RpcService {
         let transport = AxumTransport::<C>::new(self.buffer);
-        let router = transport.router_with_auth(validator);
+        let router = transport.router_with_auth(validator).layer(compression_layer());
         let dispatch = tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(
             transport,
             self.registry,
@@ -198,5 +224,79 @@ impl RpcService {
             result = axum::serve(listener, router) => result,
             _ = &mut dispatch => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use super::compression_layer;
+    use axum::{Router, http::header::CONTENT_TYPE, routing::get};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn response_headers_for(path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Both bodies are well past the size floor, so only the content type
+        // decides whether they compress.
+        let body = "x".repeat(8192);
+        let unary_body = body.clone();
+        let stream_body = body.clone();
+        let app = Router::new()
+            .route(
+                "/unary",
+                get(|| async move { ([(CONTENT_TYPE, "application/json")], unary_body) }),
+            )
+            .route(
+                "/stream",
+                get(|| async move {
+                    ([(CONTENT_TYPE, "application/x-ndjson")], stream_body)
+                }),
+            )
+            .layer(compression_layer());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut socket = TcpStream::connect(address).await.expect("connect");
+        socket
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\
+                     Connection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send");
+        let mut raw = Vec::new();
+        socket.read_to_end(&mut raw).await.expect("read");
+        server.abort();
+        String::from_utf8_lossy(&raw)
+            .split("\r\n\r\n")
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    }
+
+    #[tokio::test]
+    async fn unary_replies_are_compressed() {
+        let headers = response_headers_for("/unary").await;
+        assert!(
+            headers.contains("content-encoding: gzip"),
+            "unary reply was not compressed:\n{headers}"
+        );
+    }
+
+    /// The live stream must NOT be compressed: the encoder holds a frame until
+    /// it has enough input to emit a block, which on a delta stream means the
+    /// dashboard shows stale state until the next change happens to arrive.
+    #[tokio::test]
+    async fn streamed_replies_are_left_alone() {
+        let headers = response_headers_for("/stream").await;
+        assert!(
+            !headers.contains("content-encoding: gzip"),
+            "the streaming reply was compressed:\n{headers}"
+        );
     }
 }
