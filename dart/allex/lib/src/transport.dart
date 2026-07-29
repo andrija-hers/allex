@@ -23,15 +23,20 @@ class AllexAuthFailure {
 
 /// Low-level transport for the allex RPC wire protocol.
 ///
-/// The allex wire encoding is a double-wrapped JSON-over-bytes scheme:
+/// The allex wire encoding is a double-wrapped JSON-in-JSON scheme:
 ///
-/// Request body  = `jsonEncode(utf8.encode(jsonEncode([module, [method, utf8.encode(jsonEncode(args))]])))`.
-/// Response body = same scheme in reverse: outer JSON list of ints → utf8
-///                 decode → inner JSON → deserialise as the result type.
+/// Request body  = `jsonEncode(jsonEncode([module, [method, jsonEncode(args)]]))`.
+/// Response body = same scheme in reverse: outer JSON string → inner JSON →
+///                 deserialise as the result type.
 ///
 /// Streaming responses are newline-delimited; each frame is a JSON object
 /// with exactly one of the keys `"Progress"`, `"Success"`, or `"Error"`,
-/// whose value is a double-wrapped payload following the same byte encoding.
+/// whose value is a double-wrapped payload following the same scheme.
+///
+/// Payloads used to travel as JSON arrays of byte values — about four
+/// characters per byte, and one array element per byte for the receiver to
+/// walk. Both ends still READ that form, so a new client talks to an old
+/// server and vice versa; neither writes it any more.
 /// Called with the server's clock reading (UTC) parsed from an HTTP `Date`
 /// response header, on every response. Lets a consumer correct for device-clock
 /// skew so time-based UI decisions match the server. Optional and additive —
@@ -249,18 +254,38 @@ class AllexTransport {
     }
   }
 
+  /// Builds the request body: a payload nested in a payload, each one a JSON
+  /// **string** rather than an array of byte values.
+  ///
+  /// The array form the server used to require spent roughly four characters
+  /// per byte and forced the peer to walk one element per byte before it could
+  /// parse what they spelled — on a snapshot-sized reply that was 10.1 MB and
+  /// three million elements for 2.9 MB of JSON. Servers still read the array
+  /// form, so an older client keeps working.
   String _encodeRpcCall(String module, String method, dynamic args) {
-    final argBytes = utf8.encode(jsonEncode(args));
     final inner = jsonEncode([
       module,
-      [method, argBytes]
+      [method, jsonEncode(args)]
     ]);
-    final outerBytes = utf8.encode(inner);
-    return jsonEncode(outerBytes);
+    return jsonEncode(inner);
   }
 
+  /// Unwraps one payload level. A payload arrives as a JSON string holding the
+  /// encoded value; older servers send an array of byte values instead, which
+  /// is still accepted. Anything else is already-decoded JSON.
   dynamic _decodePayload(String raw) {
     final outer = jsonDecode(raw);
+    if (outer is String) {
+      // A JSON string is ambiguous here: usually a payload wrapping encoded
+      // JSON, but an application error can also BE a JSON string (`"Overflow"`
+      // for a unit-variant error). Unwrap when the content parses as JSON;
+      // otherwise the string is the value itself.
+      try {
+        return jsonDecode(outer);
+      } on FormatException {
+        return outer;
+      }
+    }
     if (outer is List<dynamic>) {
       final bytes = List<int>.from(outer);
       return jsonDecode(utf8.decode(bytes));

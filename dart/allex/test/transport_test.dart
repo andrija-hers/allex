@@ -58,7 +58,12 @@ class _StepsMade {
   }
 }
 
+/// The legacy wire form: a payload as a JSON array of byte values. Servers no
+/// longer write it, but both ends still read it, so it stays covered.
 String _wrap(dynamic payload) => jsonEncode(utf8.encode(jsonEncode(payload)));
+
+/// The current wire form: a payload as a JSON string holding encoded JSON.
+String _wrapString(dynamic payload) => jsonEncode(jsonEncode(payload));
 
 http.StreamedResponse _textResponse(
   int statusCode,
@@ -89,6 +94,60 @@ String? _authorization(http.BaseRequest request) =>
 
 void main() {
   group('AllexTransport.callUnary', () {
+    test('decodes a payload sent as a JSON string', () async {
+      final client = _QueueClient([
+        (_) async => _textResponse(200, _wrapString({'r': 7})),
+      ]);
+      final transport = AllexTransport(
+        baseUri: Uri.parse('http://localhost/rpc'),
+        client: client,
+      );
+
+      final result = await transport.callUnary<_AddResult, String>(
+        module: 'arithmetic_v_1',
+        method: 'add',
+        request: {'a': 3, 'b': 4},
+        decode: _AddResult.fromJson,
+        decodeError: (json) => json as String,
+      );
+
+      expect((result as Ok<_AddResult, String>).value.r, 7);
+    });
+
+    test('sends the request as nested JSON strings, not arrays of bytes',
+        () async {
+      String? sentBody;
+      final client = _QueueClient([
+        (request) async {
+          sentBody = (request as http.Request).body;
+          return _textResponse(200, _wrapString({'r': 1}));
+        },
+      ]);
+      final transport = AllexTransport(
+        baseUri: Uri.parse('http://localhost/rpc'),
+        client: client,
+      );
+
+      await transport.callUnary<_AddResult, String>(
+        module: 'arithmetic_v_1',
+        method: 'add',
+        request: {'a': 3, 'b': 4},
+        decode: _AddResult.fromJson,
+        decodeError: (json) => json as String,
+      );
+
+      // Two string levels, and nowhere an array of byte values — that form
+      // spent ~4 characters per byte in both directions.
+      final outer = jsonDecode(sentBody!);
+      expect(outer, isA<String>());
+      final call = jsonDecode(outer as String) as List<dynamic>;
+      expect(call.first, 'arithmetic_v_1');
+      final method = call[1] as List<dynamic>;
+      expect(method.first, 'add');
+      expect(method[1], isA<String>());
+      expect(jsonDecode(method[1] as String), {'a': 3, 'b': 4});
+    });
+
     test('decodes direct success payloads into Ok', () async {
       final client = _QueueClient([
         (_) async => _textResponse(200, _wrap({'r': 7})),

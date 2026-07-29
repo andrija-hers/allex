@@ -1,8 +1,69 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Opaque serialized payload exchanged across transports.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The wire form depends on the enclosing format. Binary formats take the bytes
+/// as they are. Human-readable ones (JSON) take them as a **string** when they
+/// are valid UTF-8, because the derived `Vec<u8>` encoding writes one JSON
+/// number per byte: a 2.9 MB payload went out as 10.1 MB of digits and commas
+/// — 3 million array elements the receiver then had to walk before it could
+/// even begin parsing what they spelled. Payloads are almost always UTF-8 JSON
+/// produced by a codec, so a string costs only the escaping.
+#[derive(Debug, Clone)]
 pub struct Payload(Vec<u8>);
+
+impl Serialize for Payload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match (serializer.is_human_readable(), std::str::from_utf8(&self.0)) {
+            (true, Ok(text)) => serializer.serialize_str(text),
+            // Binary formats, and the rare non-UTF-8 payload, keep the byte
+            // sequence — for JSON that is the old array form, which
+            // `Deserialize` still accepts.
+            _ => serializer.collect_seq(self.0.iter()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Payload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct PayloadVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PayloadVisitor {
+            type Value = Payload;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a payload as a string, byte array, or sequence of bytes")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Payload, E> {
+                Ok(Payload(value.as_bytes().to_vec()))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> std::result::Result<Payload, E> {
+                Ok(Payload(value.to_vec()))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> std::result::Result<Payload, E> {
+                Ok(Payload(value))
+            }
+
+            /// The legacy array-of-numbers form, still emitted by binary
+            /// formats and by peers that predate the string encoding.
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Payload, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(Payload(bytes))
+            }
+        }
+
+        deserializer.deserialize_any(PayloadVisitor)
+    }
+}
 
 impl Payload {
     /// Wraps raw bytes as a transport payload.
@@ -231,5 +292,62 @@ impl<'de> serde::Deserialize<'de> for Never {
 impl From<std::convert::Infallible> for Never {
     fn from(x: std::convert::Infallible) -> Self {
         match x {}
+    }
+}
+
+#[cfg(test)]
+mod payload_wire_tests {
+    use super::*;
+
+    #[test]
+    fn json_carries_a_payload_as_a_string_not_a_byte_array() {
+        let payload = Payload::new(br#"{"frame":"initial"}"#);
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json, r#""{\"frame\":\"initial\"}""#);
+    }
+
+    /// The size claim, on a payload the size of a real snapshot rather than a
+    /// toy: the array form spends ~4 characters per byte, the string form one
+    /// (plus an escape per quote).
+    #[test]
+    fn the_string_form_is_a_fraction_of_the_array_form() {
+        let row = r#"{"schedule_id":"example::DAILY_DIVIDENDS","status":"Processed"},"#;
+        let payload = Payload::new(row.repeat(2000).as_bytes());
+        let string_form = serde_json::to_string(&payload).expect("serialize").len();
+        let array_form = serde_json::to_string(&payload.get_bytes().to_vec())
+            .expect("array")
+            .len();
+        assert!(
+            string_form * 3 < array_form,
+            "string {string_form} vs array {array_form}"
+        );
+    }
+
+    #[test]
+    fn a_payload_round_trips_through_json() {
+        let payload = Payload::new(br#"{"a":[1,2,3],"b":"x"}"#);
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let back: Payload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.get_bytes(), payload.get_bytes());
+    }
+
+    /// Peers that predate the string form still send arrays of numbers; keep
+    /// reading them, or an old client cannot talk to a new server.
+    #[test]
+    fn the_legacy_byte_array_form_is_still_accepted() {
+        let legacy = "[123,34,97,34,58,49,125]"; // {"a":1}
+        let payload: Payload = serde_json::from_str(legacy).expect("legacy form");
+        assert_eq!(payload.get_bytes(), br#"{"a":1}"#);
+    }
+
+    /// Non-UTF-8 bytes cannot ride as a string; they fall back to the array
+    /// form rather than failing or corrupting.
+    #[test]
+    fn non_utf8_payloads_fall_back_to_the_array_form() {
+        let payload = Payload::new(&[0xff, 0xfe, 0x00]);
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json, "[255,254,0]");
+        let back: Payload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.get_bytes(), &[0xff, 0xfe, 0x00]);
     }
 }

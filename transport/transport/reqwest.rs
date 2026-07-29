@@ -270,7 +270,15 @@ fn http_status_error(url: &str, status: StatusCode, body: &[u8]) -> Error {
 }
 
 fn decode_app_error_body(body: &[u8]) -> Payload {
-    serde_json::from_slice::<Payload>(body).unwrap_or_else(|_| Payload::new(body))
+    // Legacy servers wrapped the app error in a serialized `Payload` — a JSON
+    // array of bytes; new ones send the encoded error itself. Unwrap ONLY that
+    // array form: `Payload` now also deserializes from a JSON string, so
+    // parsing as `Payload` would take a raw string error like
+    // `"InvalidCredentials"` and hand back `InvalidCredentials` — no longer
+    // valid JSON, and undecodable by the caller expecting its error type.
+    serde_json::from_slice::<Vec<u8>>(body)
+        .map(|bytes| Payload::new(&bytes))
+        .unwrap_or_else(|_| Payload::new(body))
 }
 
 fn decode_call_response<C: UnaryCodec>(url: &str, bytes: &[u8]) -> Result<CallResponse> {
@@ -435,9 +443,14 @@ mod tests {
     async fn decodes_legacy_http_422_payload_wrappers() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let encoded_payload = JsonCodec::encode(&Payload::new(br#""InvalidCredentials""#))
-            .expect("payload should encode")
-            .get_bytes_forever();
+        // The legacy wire form, written out literally rather than produced by
+        // today's encoder: old servers serialized the `Payload` newtype as a
+        // JSON array of bytes. Encoding it with the current codec would emit
+        // the modern string form and quietly stop testing the legacy path.
+        let encoded_payload = serde_json::to_vec(
+            &br#""InvalidCredentials""#.to_vec(),
+        )
+        .expect("legacy array form");
         let app = Router::new().route(
             "/rpc",
             post(move || {
