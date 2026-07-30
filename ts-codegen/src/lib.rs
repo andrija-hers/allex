@@ -1349,6 +1349,57 @@ mod tests {
     use super::*;
     use RenameTarget::{Field, Variant};
 
+    /// The TypeScript client must state the declared tier too — and it used to say
+    /// nothing at all for a method that was neither public nor role-restricted,
+    /// which is the same failure as the Dart side's inferred comment: the console's
+    /// generated client described an unreachable endpoint as an ordinary one.
+    #[test]
+    fn each_access_tier_is_documented_as_declared() {
+        const TIERED_TRAIT: &str = r#"
+            use rpc_macro::rpc_module;
+
+            #[rpc_module]
+            pub trait TieredV1 {
+                #[public]
+                fn open(&self, req: Req) -> Result<Res, Err>;
+
+                #[authenticated]
+                fn mine(&self, req: Req) -> Result<Res, Err>;
+
+                #[allowed_roles("admin", "moderator")]
+                fn privileged(&self, req: Req) -> Result<Res, Err>;
+
+                fn forgotten(&self, req: Req) -> Result<Res, Err>;
+            }
+        "#;
+        let module = &find_rpc_modules(TIERED_TRAIT)[0];
+        let client = render_client(module, "./dtos.ts", "../allex/transport.ts");
+
+        for (method, expected) in [
+            ("open(", "/** Public — no authentication required. */"),
+            ("mine(", "/** Requires authentication. */"),
+            ("privileged(", "/** Requires role: admin, moderator. */"),
+            (
+                "forgotten(",
+                "/** NO ACCESS TIER DECLARED — the server refuses every caller. */",
+            ),
+        ] {
+            let at = client
+                .find(method)
+                .unwrap_or_else(|| panic!("no method {method} in:\n{client}"));
+            let comment = client[..at]
+                .lines()
+                .rev()
+                .find(|line| line.trim_start().starts_with("/**"))
+                .unwrap_or("<none>")
+                .trim();
+            assert_eq!(
+                comment, expected,
+                "the doc comment for `{method}` must state its declared tier"
+            );
+        }
+    }
+
     #[test]
     fn apply_rename_all_cases() {
         // Fields are snake_case in Rust: snake_case/lowercase are no-ops.

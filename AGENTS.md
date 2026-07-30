@@ -28,6 +28,12 @@ top-level doc — read the crate-level `//!` comments for detail.
    the request and returns `Error::AccessForbidden` if it fails. You never write a
    manual role check.
 
+   The generated Dart/TS clients label each method with its declared tier. They
+   used to *infer* it — "not public and no roles ⇒ requires authentication" —
+   which described `logout` as merely needing a login for the whole time it was
+   refusing everyone. A generator that cannot tell what the source meant must say
+   so, not pick the reading that sounds best.
+
    **A method with no tier is a compile error, and a method with two is as well.**
    Omitting one used to mean "reachable by nobody" — safe, and invisible: the
    client still had the method, and every call came back 403. That is exactly how

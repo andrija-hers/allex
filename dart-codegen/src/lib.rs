@@ -10,6 +10,22 @@
 //! [`render_dart_client`] and [`render_dart_dtos`] emit the code. Pass one or more `--source` files
 //! — they're parsed independently and merged, so DTOs may live across files.
 //!
+//!
+//! # Generated documentation states what the trait DECLARES — it never infers
+//!
+//! Because this crate re-derives the contract from source, it is in a position to
+//! guess, and guessing once cost real damage: the access-tier comment used to be
+//! written as "not `#[public]` and no roles ⇒ requires authentication", so
+//! `IdentityV1::logout` — which declared no tier at all, and which the server's
+//! permission table therefore refused to *every* caller — was documented to
+//! consumers as merely needing a login. Nobody reading the generated client had a
+//! reason to doubt it, and the method stayed dead for over a year.
+//!
+//! Each tier is now read explicitly (`#[public]` / `#[authenticated]` /
+//! `#[allowed_roles(..)]`), and a method that declares none is labelled as
+//! refusing every caller rather than being given a plausible-sounding tier. A
+//! test pins each rendering. The rule generalises: when a generator cannot tell
+//! what the source meant, it must say so, not pick the reading that reads best.
 //! # The wire stays identical across languages
 //!
 //! Generated Dart uses idiomatic names, but its encode/decode remaps to the exact serde JSON wire
@@ -1767,6 +1783,81 @@ mod tests {
     // -----------------------------------------------------------------------
     // Fixtures
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Generated docs must state the DECLARED tier, never infer one
+    // -----------------------------------------------------------------------
+
+    /// One trait carrying all three tiers, plus a method with none — the last is
+    /// only producible by a source predating the mandatory tier, since the macro
+    /// now refuses to compile it, but this codegen parses text and will meet such
+    /// sources.
+    const TIERED_TRAIT: &str = r#"
+        use rpc_macro::rpc_module;
+
+        #[rpc_module]
+        pub trait TieredV1 {
+            #[public]
+            fn open(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+
+            #[authenticated]
+            fn mine(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+
+            #[allowed_roles("admin", "moderator")]
+            fn privileged(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+
+            fn forgotten(&self, req: AddRequest) -> Result<AddResult, ArithmeticError>;
+        }
+    "#;
+
+    /// The comment above each generated method has to match what the trait
+    /// declares. It used to be *inferred* — "neither public nor role-restricted"
+    /// was rendered as "Requires authentication." — which documented
+    /// `IdentityV1::logout` as merely needing a login for as long as it was
+    /// refusing every caller alive. Nobody reading the client had a reason to
+    /// doubt it.
+    #[test]
+    fn each_access_tier_is_documented_as_declared() {
+        let module = &find_rpc_modules(TIERED_TRAIT)[0];
+        let client = render_dart_client(module);
+
+        let cases = [
+            ("open", "/// Public — no authentication required."),
+            ("mine", "/// Requires authentication."),
+            ("privileged", "/// Requires role: admin, moderator"),
+            (
+                "forgotten",
+                "/// NO ACCESS TIER DECLARED — the server refuses every caller.",
+            ),
+        ];
+        for (method, expected) in cases {
+            let dart_name = snake_to_camel(method);
+            let at = client
+                .find(&format!("> {dart_name}("))
+                .unwrap_or_else(|| panic!("generated client has no method {dart_name}:\n{client}"));
+            let preamble = &client[..at];
+            let comment = preamble
+                .lines()
+                .rev()
+                .find(|line| line.trim_start().starts_with("///"))
+                .unwrap_or("<none>")
+                .trim();
+            assert_eq!(
+                comment, expected,
+                "the doc comment for `{method}` must state its declared tier"
+            );
+        }
+    }
+
+    #[test]
+    fn an_authenticated_method_is_not_described_as_role_restricted() {
+        let module = &find_rpc_modules(TIERED_TRAIT)[0];
+        let client = render_dart_client(module);
+        assert!(
+            !client.contains("/// Requires role: \n"),
+            "an empty role list must never be rendered as a role requirement"
+        );
+    }
 
     const ARITHMETIC_TRAIT: &str = r#"
         use rpc_macro::rpc_module;

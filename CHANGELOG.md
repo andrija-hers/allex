@@ -76,9 +76,13 @@ version number.
 - The Dart and TypeScript codegens read the tier **explicitly** instead of
   inferring it from "neither public nor role-restricted". That inference made the
   generated Dart client document `logout` as "Requires authentication." while the
-  server refused every caller alive — the generated docs were actively
-  misleading. A method with no tier (only possible from a source predating this
-  release) is now labelled as refusing every caller.
+  server refused every caller alive — so the one artifact a consumer actually
+  reads described a dead endpoint as an ordinary one, which is why the bug
+  survived a year of people looking straight at it. A method with no tier (only
+  possible from a source predating this release) is now labelled as refusing
+  every caller, and a test in each codegen pins the rendering of all four cases.
+  The rule, now in both crates' docs: a generator that cannot tell what the
+  source meant must say so, not pick the reading that sounds best.
 - **Wire format: payloads travel as JSON strings, not arrays of byte values.**
   `Payload` is still a `Vec<u8>`; only its serialized form changed. Human-readable
   formats now emit the bytes as a **string** when they are valid UTF-8 — which is
