@@ -16,7 +16,7 @@ use transport::{
 
 use crate::{
     AddRequest, ArithmeticError, ArithmeticV1Client, ArithmeticV1MethodPermissions, CountRequest,
-    CountStep, MulRequest, MulResult, StepsMade,
+    CountStep, MulRequest, MulResult, NegateRequest, NegateResult, StepsMade,
 };
 
 struct MockTransport {
@@ -62,6 +62,37 @@ impl ClientSideOneShotTransport<JsonCodec, AddRequest> for MockTransport {
         _payload: AddRequest,
     ) -> impl Future<Output = Result<Payload, Error>> + Send {
         async { unreachable!("unused in test") }
+    }
+}
+
+/// Present only to satisfy the generated client's transport bounds — the
+/// `#[authenticated]` tier is tested at the responder, not through a mock.
+impl ClientSideOneShotTransport<JsonCodec, NegateRequest> for MockTransport {
+    fn execute_method_call(
+        &self,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
+    }
+
+    fn execute_module_method_call(
+        &self,
+        _module: &str,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
+    }
+
+    fn execute_relayed_module_method_call(
+        &self,
+        _server: &str,
+        _module: &str,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
     }
 }
 
@@ -220,6 +251,37 @@ async fn count_surfaces_transport_errors_separately() {
         }
     }
 
+    /// Present only to satisfy the generated client's transport bounds — the
+    /// `#[authenticated]` tier is tested at the responder, not through a mock.
+    impl ClientSideOneShotTransport<JsonCodec, NegateRequest> for FailingTransport {
+        fn execute_method_call(
+            &self,
+            _method: &str,
+            _payload: NegateRequest,
+        ) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("negate is not exercised through a mock transport") }
+        }
+
+        fn execute_module_method_call(
+            &self,
+            _module: &str,
+            _method: &str,
+            _payload: NegateRequest,
+        ) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("negate is not exercised through a mock transport") }
+        }
+
+        fn execute_relayed_module_method_call(
+            &self,
+            _server: &str,
+            _module: &str,
+            _method: &str,
+            _payload: NegateRequest,
+        ) -> impl Future<Output = Result<Payload, Error>> + Send {
+            async { unreachable!("negate is not exercised through a mock transport") }
+        }
+    }
+
     impl ClientSideOneShotTransport<JsonCodec, MulRequest> for FailingTransport {
         fn execute_method_call(
             &self,
@@ -329,6 +391,37 @@ impl ClientSideOneShotTransport<JsonCodec, AddRequest> for BatchTransport {
         _: AddRequest,
     ) -> impl Future<Output = Result<Payload, Error>> + Send {
         async { unreachable!() }
+    }
+}
+
+/// Present only to satisfy the generated client's transport bounds — the
+/// `#[authenticated]` tier is tested at the responder, not through a mock.
+impl ClientSideOneShotTransport<JsonCodec, NegateRequest> for BatchTransport {
+    fn execute_method_call(
+        &self,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
+    }
+
+    fn execute_module_method_call(
+        &self,
+        _module: &str,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
+    }
+
+    fn execute_relayed_module_method_call(
+        &self,
+        _server: &str,
+        _module: &str,
+        _method: &str,
+        _payload: NegateRequest,
+    ) -> impl Future<Output = Result<Payload, Error>> + Send {
+        async { unreachable!("negate is not exercised through a mock transport") }
     }
 }
 
@@ -541,6 +634,10 @@ impl crate::ArithmeticV1 for PermissiveImpl {
         Ok(crate::AddResult { r: req.a + req.b })
     }
 
+    fn negate(&self, req: NegateRequest) -> Result<NegateResult, ArithmeticError> {
+        Ok(NegateResult { r: -req.a })
+    }
+
     fn mul(
         &self,
         req: MulRequest,
@@ -678,5 +775,70 @@ async fn anonymous_cannot_call_count() {
     assert!(
         matches!(err, transport::Error::AccessForbidden),
         "expected AccessForbidden, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The `#[authenticated]` tier, at the responder — the layer that decides.
+//
+// These pass an EXPLICIT caller rather than deriving one from the permission
+// table. That distinction is the whole lesson of the logout bug: a harness that
+// asks the table what role to send can never notice that the table is wrong.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn any_role_may_call_an_authenticated_method() {
+    for role in ["user", "admin", "some-role-a-host-invented"] {
+        let responder = make_responder();
+        let response = execution::MethodResponder::execute(
+            &responder,
+            "negate",
+            encode(&NegateRequest { a: 7 }),
+            Some(role),
+        )
+        .await;
+        let execution::Response::Success(payload) = response else {
+            panic!("{role} should be allowed to call negate, but the responder refused it");
+        };
+        let result: NegateResult = payload.decode::<JsonCodec, _>().expect("decodes");
+        assert_eq!(result.r, -7);
+    }
+}
+
+#[tokio::test]
+async fn an_anonymous_caller_may_not_call_an_authenticated_method() {
+    let responder = make_responder();
+    let response = execution::MethodResponder::execute(
+        &responder,
+        "negate",
+        encode(&NegateRequest { a: 7 }),
+        None,
+    )
+    .await;
+    let execution::Response::TransportError(err) = response else {
+        panic!("an anonymous caller must be refused, but the call succeeded");
+    };
+    assert!(
+        matches!(err, transport::Error::AccessForbidden),
+        "expected AccessForbidden, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_wire_form_of_a_caller_is_accepted_too() {
+    // Real callers arrive as `handle\x1erole` from a BearerTokenValidator, not as
+    // a bare role. `is_authorized` splits it; if it ever stops doing that, an
+    // authenticated caller silently becomes unauthorized.
+    let responder = make_responder();
+    let response = execution::MethodResponder::execute(
+        &responder,
+        "negate",
+        encode(&NegateRequest { a: 3 }),
+        Some("andra\u{1e}user"),
+    )
+    .await;
+    assert!(
+        matches!(response, execution::Response::Success(_)),
+        "the encoded `handle\x1erole` caller form must be accepted"
     );
 }

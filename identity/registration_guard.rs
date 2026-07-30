@@ -14,7 +14,8 @@ use transport::BearerTokenValidator;
 
 use crate::{
     AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
-    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RevokeRefreshTokenRequest,
+    RevokeRefreshTokenResponse, RoleResponse, TokenResponse, ValidateRequest,
 };
 
 #[derive(Clone, Debug)]
@@ -112,6 +113,13 @@ impl<I: IdentityV1 + Send + Sync> IdentityV1 for RegistrationGuard<I> {
         req: LogoutRequest,
     ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
         self.inner.logout(req)
+    }
+
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send {
+        self.inner.revoke_refresh_token(req)
     }
 }
 

@@ -17,7 +17,8 @@ use transport::BearerTokenValidator;
 
 use crate::{
     AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
-    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RevokeRefreshTokenRequest,
+    RevokeRefreshTokenResponse, RoleResponse, TokenResponse, ValidateRequest,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -310,6 +311,20 @@ impl IdentityV1 for InMemoryIdentityStore {
                 refresh_tokens.lock().await.remove(&rt);
             }
             Ok(LogoutResponse {})
+        }
+    }
+
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send {
+        let refresh_tokens = self.0.refresh_tokens.clone();
+        async move {
+            // Whether the token was there is deliberately not reported: this
+            // method is public, and an answer would tell a caller which tokens
+            // are live.
+            refresh_tokens.lock().await.remove(&req.refresh_token);
+            Ok(RevokeRefreshTokenResponse {})
         }
     }
 }

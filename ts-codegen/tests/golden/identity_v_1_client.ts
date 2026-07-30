@@ -3,7 +3,7 @@
 // Source trait: IdentityV1
 
 import type { AllexTransport, AllexResult, AllexStep } from "allex/transport";
-import { type IdentityError, decodeIdentityError, encodeIdentityError, type LoginRequest, decodeLoginRequest, encodeLoginRequest, type LogoutRequest, decodeLogoutRequest, encodeLogoutRequest, type LogoutResponse, decodeLogoutResponse, encodeLogoutResponse, type RefreshRequest, decodeRefreshRequest, encodeRefreshRequest, type RegisterRequest, decodeRegisterRequest, encodeRegisterRequest, type RoleResponse, decodeRoleResponse, encodeRoleResponse, type TokenResponse, decodeTokenResponse, encodeTokenResponse, type ValidateRequest, decodeValidateRequest, encodeValidateRequest } from "./dtos.ts";
+import { type IdentityError, decodeIdentityError, encodeIdentityError, type LoginRequest, decodeLoginRequest, encodeLoginRequest, type LogoutRequest, decodeLogoutRequest, encodeLogoutRequest, type LogoutResponse, decodeLogoutResponse, encodeLogoutResponse, type RefreshRequest, decodeRefreshRequest, encodeRefreshRequest, type RegisterRequest, decodeRegisterRequest, encodeRegisterRequest, type RevokeRefreshTokenRequest, decodeRevokeRefreshTokenRequest, encodeRevokeRefreshTokenRequest, type RevokeRefreshTokenResponse, decodeRevokeRefreshTokenResponse, encodeRevokeRefreshTokenResponse, type RoleResponse, decodeRoleResponse, encodeRoleResponse, type TokenResponse, decodeTokenResponse, encodeTokenResponse, type ValidateRequest, decodeValidateRequest, encodeValidateRequest } from "./dtos.ts";
 
 /** Generated client for the `identity_v_1` module. */
 export class IdentityV1Client {
@@ -56,12 +56,24 @@ export class IdentityV1Client {
     });
   }
 
+  /** Requires authentication. */
   logout(request: LogoutRequest): Promise<AllexResult<LogoutResponse, IdentityError>> {
     return this.transport.callUnary({
       module: "identity_v_1",
       method: "logout",
       request: encodeLogoutRequest(request),
       decode: (json) => decodeLogoutResponse(json),
+      decodeError: (json) => decodeIdentityError(json),
+    });
+  }
+
+  /** Public — no authentication required. */
+  revokeRefreshToken(request: RevokeRefreshTokenRequest): Promise<AllexResult<RevokeRefreshTokenResponse, IdentityError>> {
+    return this.transport.callUnary({
+      module: "identity_v_1",
+      method: "revoke_refresh_token",
+      request: encodeRevokeRefreshTokenRequest(request),
+      decode: (json) => decodeRevokeRefreshTokenResponse(json),
       decodeError: (json) => decodeIdentityError(json),
     });
   }

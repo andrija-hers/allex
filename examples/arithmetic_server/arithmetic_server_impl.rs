@@ -1,6 +1,6 @@
 use arithmetic_base::{
     AddRequest, AddResult, ArithmeticError, ArithmeticV1, CountRequest, CountStep, MulRequest,
-    MulResult, StepsMade,
+    MulResult, NegateRequest, NegateResult, StepsMade,
 };
 use progressable_future::{ProgressSender, ProgressableFuture};
 use tokio::time::{Duration, sleep};
@@ -10,6 +10,10 @@ pub struct MyArithmetic;
 impl ArithmeticV1 for MyArithmetic {
     fn add(&self, req: AddRequest) -> Result<AddResult, ArithmeticError> {
         Ok(AddResult { r: req.a + req.b })
+    }
+
+    fn negate(&self, req: NegateRequest) -> Result<NegateResult, ArithmeticError> {
+        Ok(NegateResult { r: -req.a })
     }
 
     async fn mul(&self, req: MulRequest) -> Result<MulResult, ArithmeticError> {

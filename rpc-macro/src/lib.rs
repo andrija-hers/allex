@@ -3,13 +3,13 @@
 //! # The idea: the trait is the entire contract
 //!
 //! You declare a service as a plain Rust trait and annotate it with `#[rpc_module]`. From that one
-//! trait — its method signatures and its `#[public]` / `#[allowed_roles(..)]` attributes — the
-//! macro derives *everything* on both sides of the wire. **You never hand-write a client, a request
-//! router, a role check, or (de)serialization glue.** The trait itself is the source of truth for
+//! trait — its method signatures and its `#[public]` / `#[authenticated]` / `#[allowed_roles(..)]`
+//! attributes — the macro derives *everything* on both sides of the wire. **You never hand-write a
+//! client, a request router, a role check, or (de)serialization glue.** The trait itself is the source of truth for
 //! request/response types *and* access control; the macro is the only thing that reads it.
 //!
-//! The annotated trait is re-emitted essentially verbatim (the `#[public]`/`#[allowed_roles]`
-//! attributes are stripped from it), so the server side is just `impl FooV1 for MyService { .. }` —
+//! The annotated trait is re-emitted essentially verbatim (the access-tier attributes are stripped
+//! from it), so the server side is just `impl FooV1 for MyService { .. }` —
 //! a normal trait impl with no framework types in the signatures. Doc comments on trait methods are
 //! copied onto the generated client methods, so your API docs follow the contract to callers.
 //!
@@ -53,7 +53,7 @@
 //!   `FooV1MethodResponder::<_, JsonCodec>::new(svc)` and register it in an `execution::Registry`;
 //!   it implements both `execution::MethodResponder` (unary) and `StreamingMethodExecutor`.
 //! - **`FooV1MethodPermissions`** — the role table: `MODULE_NAME`, `allowed_roles(method)`,
-//!   `is_public(method)`, `is_authorized(method, caller_role)`.
+//!   `is_public(method)`, `requires_authentication(method)`, `is_authorized(method, caller_role)`.
 //! - `FooV1ResponseStream` (the pinned stream alias) and two private codec helpers.
 //!
 //! # Gotcha: the wire module name splits the version — `FooV1` → `foo_v_1`
@@ -73,6 +73,25 @@
 //! only `#[public]` methods. This is *where* the "auth is attributes on the trait" rule in the
 //! workspace `AGENTS.md` is actually implemented — you never write the check.
 //!
+//! # The three access tiers, and why a method must declare one
+//!
+//! ```ignore
+//! #[public]                        // anyone, including callers with no identity
+//! #[authenticated]                 // any caller whose token validated, whatever role
+//! #[allowed_roles("admin", "moderator")]   // exactly these roles
+//! ```
+//!
+//! **Declaring a tier is mandatory: a method with none is a compile error.** It used to mean
+//! "reachable by nobody" — `allowed_roles` returned an empty list, so every role failed the check
+//! and anonymous callers failed `is_public` — which is a safe default and an invisible one. It
+//! shipped a dead method in this very workspace: `IdentityV1::logout` carried no attribute and
+//! answered 403 to every caller, including the authenticated ones it was written for, because the
+//! tier it needed (`#[authenticated]`) did not exist yet. A dead endpoint should not be spellable by
+//! omission, so it now fails the build with a message naming the three choices.
+//!
+//! Declaring *two* tiers is also an error. The previous behaviour silently preferred `#[public]`,
+//! i.e. resolved an ambiguous authorization declaration the most permissive way.
+//!
 //! ## The living example
 //!
 //! The `examples/arithmetic_base` crate declares the trait above; the `arithmetic_client` /
@@ -84,7 +103,7 @@ use quote::{format_ident, quote};
 use syn::{
     AngleBracketedGenericArguments, Attribute, FnArg, GenericArgument, Ident, ItemTrait, LitStr,
     PatType, PathArguments, ReturnType, Token, TraitItem, TraitItemFn, Type, TypeImplTrait,
-    TypeParamBound, parse_macro_input, punctuated::Punctuated,
+    TypeParamBound, parse_macro_input, punctuated::Punctuated, spanned::Spanned,
 };
 
 /// Expands an RPC trait into the client, responder, and permission helpers used by this workspace.
@@ -134,6 +153,10 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
     );
     let is_public_doc =
         format!("Returns whether a `{trait_ident}` method is marked with `#[public]`.");
+    let requires_authentication_doc = format!(
+        "Returns whether a `{trait_ident}` method is marked with `#[authenticated]` — \
+         callable by any caller whose token validated, whatever role it carries."
+    );
     let is_role_allowed_doc =
         format!("Returns whether the supplied role may call a `{trait_ident}` method.");
 
@@ -182,6 +205,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
     let execute_arms = methods.iter().filter_map(|m| m.execute_arm(&module_name));
     let permission_arms = methods.iter().map(MethodInfo::permission_arm);
     let is_public_arms = methods.iter().map(MethodInfo::is_public_arm);
+    let requires_authentication_arms = methods.iter().map(MethodInfo::requires_authentication_arm);
 
     Ok(quote! {
         #trait_item
@@ -328,16 +352,29 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 }
             }
 
+            #[doc = #requires_authentication_doc]
+            pub fn requires_authentication(method: &str) -> bool {
+                match method {
+                    #(#requires_authentication_arms)*
+                    _ => false,
+                }
+            }
+
             #[doc = #is_role_allowed_doc]
             pub fn is_role_allowed(method: &str, role: &str) -> bool {
                 Self::is_public(method)
+                    // `#[authenticated]` accepts every role: having a validated
+                    // identity IS the requirement, so the role is not consulted.
+                    || Self::requires_authentication(method)
                     || Self::allowed_roles(method)
                         .is_some_and(|roles| roles.iter().any(|allowed| *allowed == role))
             }
 
             /// Returns `true` when `caller_role` is permitted to call `method`.
             ///
-            /// Anonymous callers (`None`) are only permitted on `#[public]` methods.
+            /// Anonymous callers (`None`) are only permitted on `#[public]`
+            /// methods — an `#[authenticated]` method rejects them, which is the
+            /// whole point of the tier.
             pub fn is_authorized(method: &str, caller_role: ::std::option::Option<&str>) -> bool {
                 match caller_role {
                     ::std::option::Option::Some(encoded) => {
@@ -390,8 +427,22 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
     })
 }
 
+/// Who may call a method, as declared on the trait.
+///
+/// The three tiers are exhaustive on purpose: every authorization question a
+/// service can ask about a caller is "anyone", "anyone we know", or "these
+/// roles". `Authenticated` was missing until 2026-07, and its absence is why
+/// `IdentityV1::logout` shipped with no attribute at all — the tier it needed
+/// could not be spelled — which the permission table then read as *nobody*.
 enum RolesSpec {
+    /// `#[public]` — anyone, including callers with no identity at all.
     Public,
+    /// `#[authenticated]` — any caller whose bearer token validated, whatever
+    /// role it carries. The tier for "this is about you": logging out, reading
+    /// your own profile, deleting your own account.
+    Authenticated,
+    /// `#[allowed_roles("a", "b")]` — exactly these roles. An empty list is
+    /// reachable by nobody, which is what an unannotated method used to be.
     Roles(Vec<LitStr>),
 }
 
@@ -422,7 +473,14 @@ enum MethodKind {
 impl MethodInfo {
     fn from_trait_method(method: &TraitItemFn) -> syn::Result<Self> {
         let request_ty = extract_request_type(method)?;
-        let roles = parse_roles_spec(&method.attrs)?;
+        let roles = parse_roles_spec(&method.attrs).map_err(|mut e| {
+            // Point a missing tier at the method signature rather than at the
+            // attribute list that isn't there.
+            if e.to_string().starts_with(NO_TIER_ERROR_PREFIX) {
+                e = syn::Error::new_spanned(&method.sig, e.to_string());
+            }
+            e
+        })?;
         let kind = extract_method_kind(method)?;
 
         Ok(Self {
@@ -811,7 +869,9 @@ impl MethodInfo {
         let method_name = self.ident.to_string();
 
         match &self.roles {
-            RolesSpec::Public => quote! {
+            // Neither tier restricts by role, so neither has a role list.
+            // `requires_authentication` is what tells them apart.
+            RolesSpec::Public | RolesSpec::Authenticated => quote! {
                 #method_name => None,
             },
             RolesSpec::Roles(roles) => quote! {
@@ -827,30 +887,94 @@ impl MethodInfo {
             #method_name => #is_pub,
         }
     }
+
+    fn requires_authentication_arm(&self) -> proc_macro2::TokenStream {
+        let method_name = self.ident.to_string();
+        let needs_auth = matches!(self.roles, RolesSpec::Authenticated);
+        quote! {
+            #method_name => #needs_auth,
+        }
+    }
 }
 
 fn strip_rpc_attrs(method: &mut TraitItemFn) {
-    method
-        .attrs
-        .retain(|attr| !attr.path().is_ident("allowed_roles") && !attr.path().is_ident("public"));
+    method.attrs.retain(|attr| {
+        !attr.path().is_ident("allowed_roles")
+            && !attr.path().is_ident("public")
+            && !attr.path().is_ident("authenticated")
+    });
 }
 
 fn parse_roles_spec(attrs: &[Attribute]) -> syn::Result<RolesSpec> {
     let is_public = attrs.iter().any(|a| a.path().is_ident("public"));
+    let is_authenticated = attrs.iter().any(|a| a.path().is_ident("authenticated"));
+    let role_attrs: Vec<&Attribute> = attrs
+        .iter()
+        .filter(|a| a.path().is_ident("allowed_roles"))
+        .collect();
+
+    // Two tiers on one method is a contradiction, and the old code silently
+    // preferred `#[public]` — the most permissive reading of an ambiguous
+    // declaration, which is the wrong way to resolve an authorization question.
+    let declared = [is_public, is_authenticated, !role_attrs.is_empty()]
+        .iter()
+        .filter(|present| **present)
+        .count();
+    if declared > 1 {
+        let span = attrs
+            .iter()
+            .find(|a| {
+                a.path().is_ident("public")
+                    || a.path().is_ident("authenticated")
+                    || a.path().is_ident("allowed_roles")
+            })
+            .map(|a| a.span())
+            .unwrap_or_else(proc_macro2::Span::call_site);
+        return Err(syn::Error::new(
+            span,
+            "an rpc_module method declares exactly one access tier: `#[public]`, \
+             `#[authenticated]`, or `#[allowed_roles(..)]`",
+        ));
+    }
+
     if is_public {
         return Ok(RolesSpec::Public);
     }
+    if is_authenticated {
+        return Ok(RolesSpec::Authenticated);
+    }
+
+    // Declaring a tier is mandatory. Omitting one used to compile into "nobody
+    // may call this", which is a safe default and a silent one: the method is
+    // generated, the client can call it, and every call — authenticated or not —
+    // comes back 403. `IdentityV1::logout` shipped that way and stayed broken for
+    // months, because nothing about it looks wrong at the call site or in a test
+    // that exercises the store directly.
+    if role_attrs.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "{NO_TIER_ERROR_PREFIX}, so the generated permission table would \
+                 answer 403 to every caller, authenticated ones included. Declare \
+                 exactly one of: `#[public]` (anyone, including anonymous), \
+                 `#[authenticated]` (any caller whose token validated, whatever \
+                 role), or `#[allowed_roles(\"admin\", \"user\")]` (those roles). \
+                 To say \"nobody\" on purpose, write `#[allowed_roles()]`."
+            ),
+        ));
+    }
 
     let mut roles = Vec::new();
-    for attr in attrs {
-        if attr.path().is_ident("allowed_roles") {
-            let parsed = attr.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)?;
-            roles.extend(parsed);
-        }
+    for attr in role_attrs {
+        let parsed = attr.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)?;
+        roles.extend(parsed);
     }
 
     Ok(RolesSpec::Roles(roles))
 }
+
+/// Start of the missing-tier message, used to re-span it onto the method.
+const NO_TIER_ERROR_PREFIX: &str = "this rpc_module method declares no access tier";
 
 fn extract_request_type(method: &TraitItemFn) -> syn::Result<Type> {
     let mut typed_inputs = method.sig.inputs.iter().filter_map(|input| match input {
@@ -1060,4 +1184,97 @@ fn module_name_from_trait(ident: &Ident) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod access_tier_tests {
+    use super::{RolesSpec, expand_rpc_module, parse_roles_spec};
+    use syn::{ItemTrait, TraitItem, parse_quote};
+
+    /// Runs the real macro body over a trait, minus the `proc_macro` shim.
+    fn expand(item: ItemTrait) -> Result<(), String> {
+        expand_rpc_module(item)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn tier_of(method: TraitItem) -> Result<RolesSpec, String> {
+        match method {
+            TraitItem::Fn(f) => parse_roles_spec(&f.attrs).map_err(|e| e.to_string()),
+            other => panic!("expected a method, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_method_with_no_tier_is_rejected() {
+        // The whole point of the hard error: this used to compile into an
+        // endpoint that answered 403 to everybody, which is how
+        // IdentityV1::logout stayed broken without anyone noticing.
+        let err = expand(parse_quote! {
+            pub trait ThingV1 {
+                fn touch(&self, req: Req) -> Result<Res, Err>;
+            }
+        })
+        .expect_err("a method with no access tier must not compile");
+        assert!(
+            err.contains("declares no access tier"),
+            "the error should say what is missing, got: {err}"
+        );
+        for tier in ["#[public]", "#[authenticated]", "#[allowed_roles"] {
+            assert!(
+                err.contains(tier),
+                "the error should name {tier} as a choice, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_single_tier_is_accepted() {
+        for attr in [
+            quote::quote!(#[public]),
+            quote::quote!(#[authenticated]),
+            quote::quote!(#[allowed_roles("admin")]),
+            // An explicitly empty list is how you say "nobody" on purpose — the
+            // escape hatch the error message points at.
+            quote::quote!(#[allowed_roles()]),
+        ] {
+            let item: ItemTrait = syn::parse_quote! {
+                pub trait ThingV1 {
+                    #attr
+                    fn touch(&self, req: Req) -> Result<Res, Err>;
+                }
+            };
+            expand(item).unwrap_or_else(|e| panic!("{attr} should be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn two_tiers_on_one_method_are_rejected() {
+        // Previously the macro silently preferred #[public] — resolving an
+        // ambiguous authorization declaration the most permissive way.
+        let err = expand(parse_quote! {
+            pub trait ThingV1 {
+                #[public]
+                #[allowed_roles("admin")]
+                fn touch(&self, req: Req) -> Result<Res, Err>;
+            }
+        })
+        .expect_err("two tiers on one method must not compile");
+        assert!(
+            err.contains("exactly one access tier"),
+            "the error should say only one tier is allowed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn authenticated_is_neither_public_nor_role_restricted() {
+        // What the generated table must say: no role list (it accepts every
+        // role) and not public (anonymous callers are refused).
+        let tier = tier_of(parse_quote! {
+            #[authenticated]
+            fn touch(&self, req: Req) -> Result<Res, Err>;
+        })
+        .expect("parses");
+        assert!(matches!(tier, RolesSpec::Authenticated));
+    }
 }

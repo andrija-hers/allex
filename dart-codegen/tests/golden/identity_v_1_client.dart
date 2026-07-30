@@ -70,4 +70,16 @@ class IdentityV1Client {
       decode: (json) => LogoutResponse.fromJson(json),
       decodeError: (json) => IdentityError.fromJson(json),
     );
+
+  /// Public — no authentication required.
+  Future<AllexResult<RevokeRefreshTokenResponse, IdentityError>> revokeRefreshToken(
+    RevokeRefreshTokenRequest request,
+  ) =>
+    transport.callUnary(
+      module: 'identity_v_1',
+      method: 'revoke_refresh_token',
+      request: request.toJson(),
+      decode: (json) => RevokeRefreshTokenResponse.fromJson(json),
+      decodeError: (json) => IdentityError.fromJson(json),
+    );
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arithmetic_base::{
     AddRequest, AddResult, ArithmeticError, ArithmeticV1, CountRequest, CountStep, MulRequest,
-    MulResult, StepsMade,
+    MulResult, NegateRequest, NegateResult, StepsMade,
 };
 use arithmetic_base::{ArithmeticV1MethodPermissions, ArithmeticV1MethodResponder};
 use execution::{ModuleExecutor, Registry};
@@ -28,6 +28,10 @@ pub struct MyArithmetic;
 impl ArithmeticV1 for MyArithmetic {
     fn add(&self, req: AddRequest) -> Result<AddResult, ArithmeticError> {
         Ok(AddResult { r: req.a + req.b })
+    }
+
+    fn negate(&self, req: NegateRequest) -> Result<NegateResult, ArithmeticError> {
+        Ok(NegateResult { r: -req.a })
     }
 
     async fn mul(&self, req: MulRequest) -> Result<MulResult, ArithmeticError> {
@@ -98,6 +102,15 @@ pub async fn start_http_server() -> String {
             let role: Option<&str> =
                 if arithmetic_base::ArithmeticV1MethodPermissions::is_public(method_str) {
                     None
+                } else if arithmetic_base::ArithmeticV1MethodPermissions::requires_authentication(
+                    method_str,
+                ) {
+                    // Any role satisfies `#[authenticated]`; what it needs is an
+                    // identity at all. Note this helper derives the caller from the
+                    // permission table, so it can never catch a method whose tier
+                    // is wrong — the tests that do that pass an explicit caller
+                    // (see generated_code_tests.rs).
+                    Some("any-signed-in-role")
                 } else {
                     arithmetic_base::ArithmeticV1MethodPermissions::allowed_roles(method_str)
                         .and_then(|roles| roles.first().copied())

@@ -46,6 +46,11 @@ pub struct MethodInfo {
     pub request_type: String,
     pub kind: MethodKind,
     pub is_public: bool,
+    /// `#[authenticated]` — any caller whose token validated. Read explicitly
+    /// rather than inferred from "not public and no roles", which is how the
+    /// generated client came to document `IdentityV1::logout` as "requires
+    /// authentication" while the server was refusing every caller alive.
+    pub requires_authentication: bool,
     pub allowed_roles: Vec<String>,
 }
 
@@ -482,8 +487,13 @@ pub fn render_dart_client_importing(module: &RpcModuleInfo, dtos_import: &str) -
                 "  /// Requires role: {}",
                 method.allowed_roles.join(", ")
             ));
-        } else {
+        } else if method.requires_authentication {
             lines.push("  /// Requires authentication.".into());
+        } else {
+            // Only reachable from a source predating the mandatory access tier:
+            // the server's permission table refuses every caller for such a
+            // method, so say that rather than guessing a tier for it.
+            lines.push("  /// NO ACCESS TIER DECLARED — the server refuses every caller.".into());
         }
 
         match &method.kind {
@@ -614,13 +624,14 @@ fn extract_method_info(method: &TraitItemFn) -> Option<MethodInfo> {
     let dart_name = snake_to_camel(&rust_name);
     let request_type = extract_request_type_name(method)?;
     let kind = extract_method_kind(method)?;
-    let (is_public, allowed_roles) = extract_roles(&method.attrs);
+    let (is_public, requires_authentication, allowed_roles) = extract_roles(&method.attrs);
     Some(MethodInfo {
         rust_name,
         dart_name,
         request_type,
         kind,
         is_public,
+        requires_authentication,
         allowed_roles,
     })
 }
@@ -804,9 +815,12 @@ fn collect_custom_type_names(ty: &Type, out: &mut Vec<String>) {
     }
 }
 
-fn extract_roles(attrs: &[Attribute]) -> (bool, Vec<String>) {
+fn extract_roles(attrs: &[Attribute]) -> (bool, bool, Vec<String>) {
     if has_attr(attrs, "public") {
-        return (true, Vec::new());
+        return (true, false, Vec::new());
+    }
+    if has_attr(attrs, "authenticated") {
+        return (false, true, Vec::new());
     }
     let mut roles = Vec::new();
     for attr in attrs {
@@ -818,7 +832,7 @@ fn extract_roles(attrs: &[Attribute]) -> (bool, Vec<String>) {
             roles.extend(parsed.into_iter().map(|s| s.value()));
         }
     }
-    (false, roles)
+    (false, false, roles)
 }
 
 fn has_attr(attrs: &[Attribute], name: &str) -> bool {

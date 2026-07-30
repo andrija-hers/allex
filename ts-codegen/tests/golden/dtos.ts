@@ -131,6 +131,35 @@ export function encodeLogoutResponse(value: LogoutResponse): any {
   };
 }
 
+export interface RevokeRefreshTokenRequest {
+  refreshToken: string;
+}
+
+export function decodeRevokeRefreshTokenRequest(json: any): RevokeRefreshTokenRequest {
+  return {
+    refreshToken: json["refresh_token"] as string,
+  };
+}
+
+export function encodeRevokeRefreshTokenRequest(value: RevokeRefreshTokenRequest): any {
+  return {
+    "refresh_token": value.refreshToken,
+  };
+}
+
+export interface RevokeRefreshTokenResponse {
+}
+
+export function decodeRevokeRefreshTokenResponse(json: any): RevokeRefreshTokenResponse {
+  return {
+  };
+}
+
+export function encodeRevokeRefreshTokenResponse(value: RevokeRefreshTokenResponse): any {
+  return {
+  };
+}
+
 export interface RoleResponse {
   role: string;
 }

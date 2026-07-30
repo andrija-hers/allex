@@ -188,6 +188,18 @@ impl<B: CredentialBackend> CredentialStore<B> {
         }
     }
 
+    /// Drops a refresh token on its own, with no access token involved.
+    ///
+    /// The counterpart of [`IdentityV1::revoke_refresh_token`](crate::IdentityV1::revoke_refresh_token)
+    /// for hosts built on this store: the case it serves is a session that can no
+    /// longer authenticate, where requiring a live access token would mean the
+    /// longer-lived credential is the one you cannot revoke. Says nothing about
+    /// whether the token existed — a host exposing this publicly must not leak
+    /// which tokens are live.
+    pub async fn revoke_refresh_token(&self, refresh_token: &str) {
+        self.inner.refresh_tokens.lock().await.remove(refresh_token);
+    }
+
     async fn issue_for(&self, user: &AuthenticatedUser) -> Result<TokenResponse, IdentityError> {
         let token = tokens::issue_access_token_with_profile(
             &self.inner.secret,

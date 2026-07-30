@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use identity::{
     AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
-    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RevokeRefreshTokenRequest,
+    RevokeRefreshTokenResponse, RoleResponse, TokenResponse, ValidateRequest,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use message_templates::{
@@ -520,6 +521,38 @@ impl IdentityV1 for RedbIdentityStore {
                 .map_err(|e| IdentityError::Internal(e.to_string()))??;
             }
             Ok(LogoutResponse {})
+        }
+    }
+
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send {
+        let database = self.database.clone();
+        async move {
+            let refresh_token = req.refresh_token;
+            tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+                let write_tx = database
+                    .begin_write()
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                {
+                    let mut table = write_tx
+                        .open_table(REFRESH_TOKENS_TABLE)
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                    // Whether a row was there is deliberately ignored: a public
+                    // method that distinguishes them is an oracle for live tokens.
+                    let _ = table
+                        .remove(refresh_token.as_str())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                }
+                write_tx
+                    .commit()
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| IdentityError::Internal(e.to_string()))??;
+            Ok(RevokeRefreshTokenResponse {})
         }
     }
 }

@@ -3,7 +3,8 @@ use std::{future::Future, path::Path, sync::Arc};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use identity::{
     AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
-    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RevokeRefreshTokenRequest,
+    RevokeRefreshTokenResponse, RoleResponse, TokenResponse, ValidateRequest,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use message_templates::{
@@ -432,6 +433,31 @@ impl IdentityV1 for SqliteIdentityStore {
             .await
             .map_err(|e| IdentityError::Internal(e.to_string()))??;
             Ok(LogoutResponse {})
+        }
+    }
+
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send {
+        let store = self.clone();
+        async move {
+            let refresh_token = req.refresh_token;
+            tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+                let conn = store.open_conn()?;
+                // The affected-row count is discarded on purpose: this method is
+                // public, so unknown, expired and already-revoked tokens must all
+                // look the same from outside.
+                conn.execute(
+                    "DELETE FROM refresh_tokens WHERE token = ?1",
+                    params![refresh_token],
+                )
+                .map_err(db_err)?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| IdentityError::Internal(e.to_string()))??;
+            Ok(RevokeRefreshTokenResponse {})
         }
     }
 }

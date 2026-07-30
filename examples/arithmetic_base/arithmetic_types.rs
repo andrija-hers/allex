@@ -11,6 +11,20 @@ pub struct AddRequest {
     /// Right operand.
     pub b: i32,
 }
+
+/// Operand for [`ArithmeticV1::negate`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegateRequest {
+    /// The number to negate.
+    pub a: i32,
+}
+
+/// Result of [`ArithmeticV1::negate`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegateResult {
+    /// The negated value.
+    pub r: i32,
+}
 /// Result payload for integer addition.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
@@ -74,6 +88,14 @@ pub trait ArithmeticV1 {
         &self,
         req: MulRequest,
     ) -> impl Future<Output = Result<MulResult, ArithmeticError>> + Send;
+    /// Negates a number for any signed-in caller.
+    ///
+    /// `#[authenticated]` is the third tier: it accepts every role and refuses
+    /// anonymous callers. Use it for "this is about you" operations — signing out,
+    /// reading your own profile — where requiring a *particular* role would be
+    /// wrong and `#[public]` would be too open.
+    #[authenticated]
+    fn negate(&self, req: NegateRequest) -> Result<NegateResult, ArithmeticError>;
     /// Counts from `from` to `to`, streaming intermediate progress to `admin` callers.
     #[allowed_roles("admin")]
     fn count(&self, req: CountRequest)

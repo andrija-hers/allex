@@ -23,9 +23,22 @@
 //!
 //! # The service
 //!
-//! [`IdentityV1`] is `register` / `login` / `refresh` / `validate` / `logout`; each returns a
-//! `TokenResponse` (an access + refresh JWT pair). All are `#[public]` except `logout`. It's a
-//! normal `#[rpc_module]` trait, so it's registered and served exactly like any other module.
+//! [`IdentityV1`] is `register` / `login` / `refresh` / `validate` / `logout` /
+//! `revoke_refresh_token`. It's a normal `#[rpc_module]` trait, so it's registered and served
+//! exactly like any other module.
+//!
+//! The access tiers say who may call what, and the split at the end is deliberate:
+//!
+//! | method | tier | why |
+//! |---|---|---|
+//! | `register`, `login`, `refresh`, `validate` | `#[public]` | this is how a caller *gets* an identity |
+//! | `logout` | `#[authenticated]` | ends the session you are calling with |
+//! | `revoke_refresh_token` | `#[public]` | possession of the token is the proof, and the session it belongs to may already be dead |
+//!
+//! **`logout` carried no tier at all until 2026-07**, which the generated permission table read as
+//! *nobody may call this* — so every logout over RPC answered 403 and no session was ever ended.
+//! The tier it needed did not exist yet. Adding `#[authenticated]` fixed the method; making an
+//! unannotated method a compile error fixed the class.
 //!
 //! # How it plugs into the rest of allex
 //!
@@ -101,11 +114,50 @@ pub trait IdentityV1 {
         req: ValidateRequest,
     ) -> impl std::future::Future<Output = Result<RoleResponse, IdentityError>> + Send;
 
-    /// Revokes an access and/or refresh token so they are rejected on all subsequent requests.
+    /// Ends the session this call is made with: the access token is refused from
+    /// now on, and the paired refresh token is deleted when one is supplied.
+    ///
+    /// The access token has to travel in the request body because a handler
+    /// cannot see the bearer — `CallerContext` carries the handle, role and
+    /// profile, not the credential.
+    ///
+    /// A refresh token belonging to *another* account is refused: this method is
+    /// "end my session", not "end any session whose token I have obtained".
+    /// Ending a session whose access token has already expired is
+    /// [`Self::revoke_refresh_token`], which needs no live session.
+    ///
+    /// **Historical note.** Until 2026-07 this method carried no access-tier
+    /// attribute, which the generated permission table read as *reachable by
+    /// nobody*: every caller got a 403, so no session was ever actually ended
+    /// over RPC. The tier it needed — `#[authenticated]` — did not exist. Both
+    /// halves of that are fixed; an unannotated method is now a compile error.
+    #[authenticated]
     fn logout(
         &self,
         req: LogoutRequest,
     ) -> impl std::future::Future<Output = Result<LogoutResponse, IdentityError>> + Send;
+
+    /// Invalidates a refresh token, with no live session required.
+    ///
+    /// `#[public]` because possession of the token *is* the proof, exactly as it
+    /// is for a password-reset link — and because the case this exists for is a
+    /// session that can no longer authenticate: the access token has expired, the
+    /// app cold-started, or a queued sign-out is being retried. Requiring
+    /// authentication there would mean the credential that outlives the session
+    /// is the one you cannot revoke.
+    ///
+    /// **Non-enumerating.** Unknown, expired and already-revoked tokens all
+    /// answer with the same empty success. Reporting "no such token" would make
+    /// this an oracle for whether a token is live, callable by anyone.
+    ///
+    /// Possession already permits minting access tokens, so exposing this adds
+    /// nuisance (someone with a leaked token can end that session) and no
+    /// privilege. Rate limiting is the host's business.
+    #[public]
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl std::future::Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send;
 }
 
 /// Idempotently ensures a user exists by registering `(handle, password, role)`
@@ -160,5 +212,77 @@ mod ensure_user_tests {
                 .await
                 .is_ok()
         );
+    }
+}
+
+/// What the generated permission table says about each of `IdentityV1`'s
+/// methods, asserted at the layer where the answer is actually produced.
+///
+/// This is the test that was missing. Every store's `logout` test calls the
+/// store *directly*, so all of them passed while the method was unreachable over
+/// RPC: the authorization gate lives in the generated responder, and nothing
+/// exercised it. A dead endpoint is invisible from below.
+#[cfg(test)]
+mod access_tier_tests {
+    use super::IdentityV1MethodPermissions as P;
+
+    /// The wire form of a caller: `handle\x1erole`. Passing a bare role would
+    /// test something the server never sees.
+    fn caller(role: &str) -> String {
+        format!("andra\u{1e}{role}")
+    }
+
+    #[test]
+    fn logout_is_callable_by_any_authenticated_caller() {
+        // The regression this file exists for. Before `#[authenticated]`, every
+        // one of these was false and `logout` answered 403 to the whole world.
+        for role in [
+            "user",
+            "admin",
+            "moderator",
+            "viewer",
+            "whatever-a-host-invents",
+        ] {
+            assert!(
+                P::is_authorized("logout", Some(&caller(role))),
+                "an authenticated {role} must be able to end their own session"
+            );
+        }
+    }
+
+    #[test]
+    fn logout_still_refuses_anonymous_callers() {
+        // `#[authenticated]` is not `#[public]`: no identity, no logout.
+        assert!(!P::is_authorized("logout", None));
+        assert!(P::requires_authentication("logout"));
+        assert!(!P::is_public("logout"));
+        // And it is not role-restricted — having an identity is the whole test.
+        assert!(P::allowed_roles("logout").is_none());
+    }
+
+    #[test]
+    fn revoking_a_refresh_token_needs_no_session() {
+        // The half of logout that must work when the session is already dead.
+        assert!(P::is_authorized("revoke_refresh_token", None));
+        assert!(P::is_public("revoke_refresh_token"));
+        assert!(!P::requires_authentication("revoke_refresh_token"));
+    }
+
+    #[test]
+    fn the_credential_endpoints_stay_public() {
+        for method in ["register", "login", "refresh", "validate"] {
+            assert!(
+                P::is_authorized(method, None),
+                "{method} is how a caller gets an identity in the first place"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_method_is_authorized_for_nobody() {
+        // The fallback arm: a method that does not exist must not be reachable,
+        // which is what makes the permission gate safe to run before dispatch.
+        assert!(!P::is_authorized("no_such_method", None));
+        assert!(!P::is_authorized("no_such_method", Some(&caller("admin"))));
     }
 }

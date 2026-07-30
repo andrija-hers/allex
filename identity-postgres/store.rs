@@ -16,7 +16,8 @@ use transport::BearerTokenValidator;
 
 use identity::{
     AccountRecord, AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest,
-    LogoutResponse, RefreshRequest, RegisterRequest, RoleResponse, TokenResponse, ValidateRequest,
+    LogoutResponse, RefreshRequest, RegisterRequest, RevokeRefreshTokenRequest,
+    RevokeRefreshTokenResponse, RoleResponse, TokenResponse, ValidateRequest,
 };
 
 const FORGOT_PASSWORD_TEMPLATE_KEY: &str = "forgot_password";
@@ -470,7 +471,17 @@ impl IdentityV1 for PostgresIdentityStore {
     ) -> impl Future<Output = Result<LogoutResponse, IdentityError>> + Send {
         let db = self.db.clone();
         let revoked = self.revoked_tokens.clone();
+        let secret = self.secret.clone();
         async move {
+            // Attribute the session first: the access token names the account
+            // whose session this is, which is what lets the refresh delete be
+            // scoped to that account below.
+            let session_handle = req
+                .token
+                .as_deref()
+                .and_then(|token| identity::tokens::validate_access_token(&secret, token).ok())
+                .map(|validated| validated.handle);
+
             if let Some(token) = req.token {
                 revoked
                     .lock()
@@ -479,11 +490,68 @@ impl IdentityV1 for PostgresIdentityStore {
             }
             if let Some(rt) = req.refresh_token {
                 let client = db.get_client().await.map_err(db_err)?;
-                let _ = client
-                    .execute("DELETE FROM refresh_tokens WHERE token = $1", &[&rt])
-                    .await;
+                match session_handle {
+                    // Scoped by handle so a client that mixes up two sessions
+                    // cannot sign out the wrong person. This is a guard against a
+                    // confused caller, not a security boundary: whoever holds a
+                    // refresh token can already mint access tokens with it, which
+                    // is also why `revoke_refresh_token` needs no session at all.
+                    Some(handle) => {
+                        let deleted = client
+                            .execute(
+                                "DELETE FROM refresh_tokens WHERE token = $1 AND handle = $2",
+                                &[&rt, &handle],
+                            )
+                            .await
+                            .map_err(db_err)?;
+                        if deleted == 0 {
+                            // Nothing deleted: either it was already gone, which
+                            // is a successful logout, or it belongs to somebody
+                            // else, which is a bug in the caller and is worth
+                            // saying out loud rather than silently ignoring.
+                            let belongs_to_another = client
+                                .query_opt("SELECT 1 FROM refresh_tokens WHERE token = $1", &[&rt])
+                                .await
+                                .map_err(db_err)?
+                                .is_some();
+                            if belongs_to_another {
+                                return Err(IdentityError::InvalidRefreshToken);
+                            }
+                        }
+                    }
+                    // No usable access token to attribute the session to (absent,
+                    // expired or malformed). Possession is then the only proof
+                    // available, which is exactly the public method's contract.
+                    None => {
+                        let _ = client
+                            .execute("DELETE FROM refresh_tokens WHERE token = $1", &[&rt])
+                            .await;
+                    }
+                }
             }
             Ok(LogoutResponse {})
+        }
+    }
+
+    fn revoke_refresh_token(
+        &self,
+        req: RevokeRefreshTokenRequest,
+    ) -> impl Future<Output = Result<RevokeRefreshTokenResponse, IdentityError>> + Send {
+        let db = self.db.clone();
+        let refresh_token = req.refresh_token;
+        async move {
+            let client = db.get_client().await.map_err(db_err)?;
+            // The row count is deliberately discarded: unknown, expired and
+            // already-revoked tokens must be indistinguishable from a live one,
+            // or this public method becomes an oracle for which tokens work.
+            let _ = client
+                .execute(
+                    "DELETE FROM refresh_tokens WHERE token = $1",
+                    &[&refresh_token],
+                )
+                .await
+                .map_err(db_err)?;
+            Ok(RevokeRefreshTokenResponse {})
         }
     }
 }

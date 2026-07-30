@@ -150,6 +150,35 @@ class LogoutResponse {
   };
 }
 
+class RevokeRefreshTokenRequest {
+  final String refreshToken;
+  const RevokeRefreshTokenRequest({
+    required this.refreshToken,
+  });
+
+  factory RevokeRefreshTokenRequest.fromJson(dynamic json) {
+    final map = json as Map<String, dynamic>;
+    return RevokeRefreshTokenRequest(
+      refreshToken: map['refresh_token'] as String,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'refresh_token': refreshToken,
+  };
+}
+
+class RevokeRefreshTokenResponse {
+  const RevokeRefreshTokenResponse();
+
+  factory RevokeRefreshTokenResponse.fromJson(dynamic json) {
+    return RevokeRefreshTokenResponse();
+  }
+
+  Map<String, dynamic> toJson() => {
+  };
+}
+
 class RoleResponse {
   final String role;
   const RoleResponse({
