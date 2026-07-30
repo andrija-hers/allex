@@ -52,6 +52,14 @@ version number.
   for a password-reset link, and the answer is identical for unknown, expired and
   live tokens so it cannot be used to probe which ones work.
   `CredentialStore` gains the same operation as an inherent method.
+- **gzip on unary replies** (`allex-host`), when the client sends
+  `Accept-Encoding`. `application/x-ndjson` is deliberately **excluded**: the
+  encoder holds a frame until it has enough input to emit a block, so with frames
+  produced 300 ms apart the first did not reach the socket until the second
+  existed — stale state on a dashboard, traded for bytes that are free on a local
+  hop. A `SizeAbove` threshold keeps the encoder off replies too small to gain.
+  No client change is needed: browsers and `dart:io` request gzip and decompress
+  transparently.
 
 ### Changed
 - **BREAKING: an `#[rpc_module]` method with no access tier no longer compiles**,
@@ -109,16 +117,6 @@ version number.
     and is now **1.33 MB**. Services that sized a max-body limit around the old
     inflation can lower it by an order of magnitude — and uploads that used to
     fail just above 1 MB against a 12 MB limit now succeed.
-
-### Added
-- **gzip on unary replies** (`allex-host`), when the client sends
-  `Accept-Encoding`. `application/x-ndjson` is deliberately **excluded**: the
-  encoder holds a frame until it has enough input to emit a block, so with frames
-  produced 300 ms apart the first did not reach the socket until the second
-  existed — stale state on a dashboard, traded for bytes that are free on a local
-  hop. A `SizeAbove` threshold keeps the encoder off replies too small to gain.
-  No client change is needed: browsers and `dart:io` request gzip and decompress
-  transparently.
 
 ### Documentation
 - Corrected the `#[rpc_module]` usage examples (`README.md`, the `allex` and
