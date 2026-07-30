@@ -10,6 +10,99 @@ version number.
 
 ## [Unreleased]
 
+### Fixed
+- **`IdentityV1::logout` was unreachable, and had been for as long as the role
+  table has existed.** It carried no access-tier attribute, which the generated
+  permission table reads as *nobody may call this* — so every logout over RPC
+  answered 403, including from the authenticated callers it was written for, and
+  no session was ever actually ended. The refresh token was not deleted either,
+  so it stayed valid for its full lifetime after a "sign out".
+
+  Three store test suites covered `logout` and all three passed, because each
+  calls the store **directly**: the authorization gate lives in the generated
+  responder, which none of them instantiate. A dead endpoint is invisible from
+  below. `allex-identity` now asserts the permission table itself.
+
+### Added
+- **`#[authenticated]` — the third access tier.** "Any caller whose token
+  validated, whatever role it carries" was not expressible: there was
+  `#[public]` (anyone, anonymous included) and `#[allowed_roles(..)]` (exact
+  roles), and nothing in between. That gap is why `logout` shipped with no
+  attribute at all — the tier it needed could not be spelled. Generated
+  permissions gain `requires_authentication(method)`; `is_role_allowed` accepts
+  every role for such a method and still refuses anonymous callers.
+- **`IdentityV1::revoke_refresh_token`** (`#[public]`), splitting sign-out along
+  the line of what proves you may do it. `logout` (`#[authenticated]`) ends the
+  session you are calling with; this ends a refresh token when the session behind
+  it can no longer authenticate — an expired access token, a cold-started app, a
+  queued sign-out being retried. Possession of the token is the proof, exactly as
+  for a password-reset link, and the answer is identical for unknown, expired and
+  live tokens so it cannot be used to probe which ones work.
+  `CredentialStore` gains the same operation as an inherent method.
+
+### Changed
+- **BREAKING: an `#[rpc_module]` method with no access tier no longer compiles**,
+  and neither does one with two. The old behaviour was "no attribute means
+  nobody", which is safe and silent — it generates a client method that answers
+  403 to every caller. Two attributes silently preferred `#[public]`, resolving an
+  ambiguous authorization declaration the most permissive way. The error names the
+  three tiers; `#[allowed_roles()]` with an empty list still says "nobody" on
+  purpose. Surveyed before landing: across allex, stasera, datascope,
+  ISystem-backend and epicfix, **every** real `#[rpc_module]` method already
+  declared a tier — the sole exception in the whole neighbourhood was `logout`
+  above, so this error can only fire on endpoints that were already dead.
+- **BREAKING: `IdentityV1` gained a method**, so hand-written stores must
+  implement `revoke_refresh_token`. There is deliberately no default
+  implementation: a store that silently accepted a revocation and dropped it would
+  repeat the failure this release exists to fix.
+- `PostgresIdentityStore::logout` now scopes the refresh-token delete to the
+  handle named by the access token, and answers `InvalidRefreshToken` when the
+  token belongs to somebody else. A guard against a confused client rather than a
+  security boundary — whoever holds a refresh token can already mint access
+  tokens with it, which is also why `revoke_refresh_token` needs no session.
+- The Dart and TypeScript codegens read the tier **explicitly** instead of
+  inferring it from "neither public nor role-restricted". That inference made the
+  generated Dart client document `logout` as "Requires authentication." while the
+  server refused every caller alive — the generated docs were actively
+  misleading. A method with no tier (only possible from a source predating this
+  release) is now labelled as refusing every caller.
+- **Wire format: payloads travel as JSON strings, not arrays of byte values.**
+  `Payload` is still a `Vec<u8>`; only its serialized form changed. Human-readable
+  formats now emit the bytes as a **string** when they are valid UTF-8 — which is
+  always, for a payload produced by a JSON codec — instead of one JSON number per
+  byte. Binary formats and non-UTF-8 payloads keep the byte sequence.
+
+  **This is a breaking change on the wire, not in the Rust API.** `cargo` cannot
+  warn you about it: the code compiles, and the mismatch appears only between a
+  peer built before this change and one built after.
+
+  - Post-change readers accept **both** forms (the `Payload` `Deserialize` visitor
+    handles `visit_str` and `visit_seq`; the Dart client unwraps either). Writers
+    emit only the string form.
+  - Therefore **both directions break across the boundary**: an old client cannot
+    decode a new server's response (its decoder only knows the array form), and an
+    old server rejects a new client's request with 400. There is no deploy
+    ordering that avoids the gap — see `AGENTS.md`, "Upgrading allex where clients
+    are already in the field".
+  - Measured, same JSON either way: **3.2–3.4×** faster server-side encode
+    (serde_json, release), **3.5–4.2×** faster parse on V8, **2.2–2.5×** on the
+    Dart VM, **3.1×** fewer bytes uncompressed (**1.3×** after gzip). The request
+    path compounds, because a call's arguments are a payload nested inside the
+    envelope payload: a 1 MB inline base64 upload was a **13.00 MB** request body
+    and is now **1.33 MB**. Services that sized a max-body limit around the old
+    inflation can lower it by an order of magnitude — and uploads that used to
+    fail just above 1 MB against a 12 MB limit now succeed.
+
+### Added
+- **gzip on unary replies** (`allex-host`), when the client sends
+  `Accept-Encoding`. `application/x-ndjson` is deliberately **excluded**: the
+  encoder holds a frame until it has enough input to emit a block, so with frames
+  produced 300 ms apart the first did not reach the socket until the second
+  existed — stale state on a dashboard, traded for bytes that are free on a local
+  hop. A `SizeAbove` threshold keeps the encoder off replies too small to gain.
+  No client change is needed: browsers and `dart:io` request gzip and decompress
+  transparently.
+
 ### Documentation
 - Corrected the `#[rpc_module]` usage examples (`README.md`, the `allex` and
   `allex-rpc-macros` READMEs, `AGENTS.md`). A contract crate must depend on the
@@ -25,6 +118,23 @@ version number.
   dependency without the aliased contract deps above. Making the macro
   self-contained is planned for 0.2.0; it is a breaking change for consumers that
   rely on the current bare-name aliases.
+- **0.2.0 also carries the payload wire change above**, which is the more
+  consequential of the two for anyone already running allex: the macro break stops
+  a build, the wire break stops a deployed client. Version numbers only gate
+  consumers that depend on crates.io — a project depending on allex by `path` or
+  `git` picks it up on the next `git pull`, with no version bump to notice. Say so
+  in the release notes.
+- **Bump `dart/allex/pubspec.yaml` in lockstep with 0.2.0.** The Dart package is
+  the other half of the wire contract, and the change above did not touch its
+  version — both it and the Rust workspace still read `0.1.0`, so a Flutter
+  consumer has no way to tell which payload form its copy speaks. The package
+  version is the only signal those consumers get.
+- **Considered, not built: a legacy-write switch.** Emitting the array form on
+  demand (an `AtomicBool` consulted in `Payload::serialize`, ~5 lines, since both
+  read paths already exist) turns the wire break into a staged rollout: deploy with
+  legacy writes on → ship clients that read both → flip the switch → delete it a
+  release later. Worth having before a consumer ships to an app store, where review
+  latency puts days between a client release and a server release.
 
 ## [0.1.0] - 2026-07-13
 

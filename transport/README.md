@@ -9,6 +9,13 @@ The wire layer: `Payload`, `Error`, `ModuleMethodCall`, the `JsonCodec`, and
 SignalR transports. It also defines `BearerTokenValidator`, the seam an identity
 store implements to authenticate callers.
 
+Payloads are opaque bytes that are, with a JSON codec, always UTF-8 text — so a
+human-readable format carries them as a **JSON string**, not as an array of byte
+values. That changed in 2026-07 and is a **wire** break for peers built earlier
+(both forms are still read, only the string form is written). Before upgrading a
+project whose clients are already installed, read "Upgrading allex where clients
+are already in the field" in `AGENTS.md`.
+
 Key ideas: payloads are **opaque bytes**, the codec is a *type* not a value, and
 `Error::App` is the seam between a transport fault and an application error. This
 crate is where the **error → HTTP status** table is enforced: application error →

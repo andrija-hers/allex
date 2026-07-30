@@ -6,7 +6,7 @@ typed clients for other languages, and a set of runtime crates handle transport,
 dispatch, identity, streaming, and state. This file is the map. There is no other
 top-level doc — read the crate-level `//!` comments for detail.
 
-## The five load-bearing facts (these trip people up)
+## The six load-bearing facts (these trip people up)
 
 1. **A service is a `#[rpc_module]` trait.** `allex-rpc-macros` turns
    `#[rpc_module] trait FooV1 { ... }` into `FooV1Client`, `FooV1MethodResponder`
@@ -14,12 +14,29 @@ top-level doc — read the crate-level `//!` comments for detail.
    `impl Future<Output = Result<T, E>> + Send`; streaming methods return a
    `ProgressableFuture` (see `allex-progressable-future`).
 
-2. **Authorization is attributes on the trait, enforced in generated code.**
-   `#[public]` = anyone (incl. anonymous); `#[allowed_roles("admin","user")]` =
-   those roles only. The generated responder calls
+2. **Authorization is attributes on the trait, enforced in generated code, and
+   every method must declare one of exactly three tiers.**
+
+   | attribute | who may call |
+   |---|---|
+   | `#[public]` | anyone, including callers with no identity |
+   | `#[authenticated]` | any caller whose token validated, whatever role it carries |
+   | `#[allowed_roles("admin","user")]` | those roles only |
+
+   The generated responder calls
    `FooV1MethodPermissions::is_authorized(method, caller_role)` **before** decoding
    the request and returns `Error::AccessForbidden` if it fails. You never write a
    manual role check.
+
+   **A method with no tier is a compile error, and a method with two is as well.**
+   Omitting one used to mean "reachable by nobody" — safe, and invisible: the
+   client still had the method, and every call came back 403. That is exactly how
+   `IdentityV1::logout` shipped dead, for as long as the role table has existed,
+   while three separate store test suites passed — they all called the store
+   directly, and the gate lives in the responder. If you take one lesson from
+   this file: **a test that never goes through the responder cannot tell you
+   whether your endpoint is reachable.** `#[allowed_roles()]` with an empty list
+   is how you say "nobody" on purpose.
 
 3. **`allex-guards` is NOT authorization.** It is a disk/RAM headroom watchdog
    (gauges + hysteresis for fire-and-forget services). Auth lives in
@@ -44,6 +61,130 @@ top-level doc — read the crate-level `//!` comments for detail.
    `allex_serve::deny_access()` (or `allex_serve::authorize(cond, err)?`) so the
    denial becomes a **403**, not a 422 — otherwise a domain `Err` reads as an
    application error.
+
+6. **Payloads are opaque bytes that are almost always text, and their wire form
+   changed in 2026-07.** A `Payload` holds one value already serialized by the
+   module's codec — with `JsonCodec` that is `serde_json::to_vec`, i.e. UTF-8 JSON
+   *text*. It is bytes because the router moves values it cannot name: dispatch
+   routes `(module, (method, payload))` and only the generated responder knows the
+   types. Those bytes used to go out as one JSON number per byte and now go out as
+   a JSON string. **If your project has clients already in the field, read the next
+   section before upgrading allex.**
+
+## Upgrading allex where clients are already in the field
+
+This section exists for one change: `perf(transport): carry payloads as JSON
+strings, not arrays of byte values` (with `feat(host): gzip unary replies` in the
+same release). It is a **wire** break, not an API break — nothing fails to
+compile, and nothing warns you.
+
+### What changed
+
+`Payload(Vec<u8>)` is unchanged as a type. Its `Serialize` impl now emits a JSON
+string when the format is human-readable and the bytes are valid UTF-8; binary
+formats (bincode, msgpack) keep the byte sequence, where a `Vec<u8>` is
+length-prefixed anyway and nothing is lost.
+
+```
+old:  [123,34,116,111,107,101,110,34,58,…]        ~3.4 characters per byte
+new:  "{\"token\":\"eyJ…\"}"                       escaping only, ~1.05×
+```
+
+Why it was worth a break, measured on one machine with the same inner JSON:
+
+| | server encode (Rust) | parse (V8) | parse (Dart VM) | bytes | bytes gzipped |
+|---|---|---|---|---|---|
+| speedup | 3.2–3.4× | 3.5–4.2× | 2.2–2.5× | 3.1× | 1.3× |
+
+gzip already recovers most of the *byte* win, so the case rests on CPU and
+allocation on both ends — which compression cannot help, because the receiver
+still walks one parser element per byte after decompressing. On a 1.8 MB reply
+that is 33 ms → 9 ms of parse in a browser.
+
+**The request path compounds**, because a call's arguments are a payload nested
+inside the envelope payload:
+
+```
+request  = JSON( Payload( JSON([module, [method, Payload( JSON(args) )]]) ) )   ← two levels
+response = JSON( Payload( JSON(value) ) )                                       ← one level
+```
+
+So a 1 MB inline base64 upload was a **13.00 MB** request body and is now
+**1.33 MB**. If your service sized a max-body limit around the old inflation, it
+can drop by an order of magnitude; if uploads mysteriously failed just above 1 MB
+against a 12 MB limit, that was this.
+
+### Compatibility, precisely
+
+Readers built **after** the change accept both forms. Writers emit only the new
+one. So across the boundary:
+
+| | old peer reads new writer | new peer reads old writer |
+|---|---|---|
+| server → client | ✗ old client cannot decode the response | ✓ |
+| client → server | ✗ old server answers **400** | ✓ (verified live) |
+
+**There is no deploy ordering that avoids the gap.** Shipping the server first
+breaks installed clients; shipping the client first gets 400s from the old server.
+If you need a staged rollout, add the legacy-write switch described under
+"Planned" in `CHANGELOG.md` — the read paths already exist, so it is a few lines
+in `Payload::serialize`.
+
+### Whether this affects your project: it is about deployment topology
+
+The question is not which language your client is in, it is **whether the client
+can be running while the server is replaced**.
+
+| topology | exposure | what to do |
+|---|---|---|
+| Client is a static bundle served by the same host as the API (Flutter web, a Vite/Svelte SPA under a path) | **none** — they ship together | rebuild the client in the same deploy; worst case is a browser tab left open, fixed by a refresh |
+| Client is an installed native binary (Android/iOS app, desktop build) or lives behind an app-store review | **flag day** — every installed copy breaks when the server restarts | ship a client build first and give it time to propagate, or add the legacy-write switch; check whether your update prompt still works (a *static* manifest fetch survives; an RPC-based one does not) |
+| Third-party or hand-written consumer you do not rebuild | **flag day** | it must learn to read both forms, or you keep writing the legacy one |
+
+As of 2026-07-30 the allex consumers in this workspace's neighbourhood are five
+client surfaces — four Flutter apps and one TypeScript console, all `path`
+dependencies on `dart/allex` or generated by `ts-codegen`. Four are served by the
+host that serves their API and carry no exposure. The one exception is a
+**sideloaded Android app** (stasera), which is the topology to watch: it is also
+the one heading for app stores, where review latency makes client/server skew
+unavoidable. (The `allex` 2.x packages in some older JS projects are the unrelated
+legacy npm framework, not this wire.)
+
+### Symptoms of a mismatch
+
+- **Dart/Flutter client, old build:** every call fails, including login. The old
+  `_decodePayload` returns the raw JSON *string* where a `Map` is expected, so you
+  get a type error surfacing as whatever your wrapper throws — not a decode error
+  that names the problem.
+- **Old server, new client:** HTTP 400 with "Could not decode request payload".
+- **Hand-rolled clients — the sneaky one.** Smoke scripts, curl helpers and test
+  harnesses that build the envelope by hand (`json.dumps(list(inner.encode()))`
+  and `bytes(json.loads(body))`) break with a type error such as `TypeError: string
+  argument without an encoding`. Grep your repo for `bytes(json.loads` and for
+  `utf8.encode(jsonEncode`; the fix is three lines:
+
+  ```python
+  def payload(raw):                      # accept both encodings
+      outer = json.loads(raw)
+      if isinstance(outer, list): outer = bytes(outer).decode()
+      return json.loads(outer)
+  ```
+
+### Checklist when you bump allex in a dependent project
+
+1. `git pull` allex, rebuild the server, **regenerate the clients**
+   (`cargo run -p xtask -- dart-codegen` / `ts-codegen`, or your equivalent) — a
+   generated client is only new once you regenerate *and* rebuild the app.
+2. Fix hand-rolled envelope code in scripts and tests (see above).
+3. Decide the topology question from the table. If anything installed is in the
+   field, plan for it before the server restarts.
+4. Revisit max-body / upload limits — the request path shrank ~10×.
+5. gzip needs nothing, but if you stream `application/x-ndjson` through your own
+   layer, keep it uncompressed: a compressor buffers frames and stalls a live
+   channel.
+6. Note that **a `path` or `git` dependency gives you all of this with no version
+   number to notice.** Only crates.io consumers are gated by the version bump
+   (0.2.0).
 
 ## Crate menu
 
@@ -125,7 +266,7 @@ top-level doc — read the crate-level `//!` comments for detail.
 ## Identity — pick the right entry point
 
 allex ships the `IdentityV1` service (`register` / `login` / `refresh` /
-`validate` / `logout`) plus four ready-made stores:
+`validate` / `logout` / `revoke_refresh_token`) plus four ready-made stores:
 `InMemoryIdentityStore` (dev/tests), `SqliteIdentityStore`, `PostgresIdentityStore`,
 `RedbIdentityStore`. All do **bcrypt over a `users(handle, password_hash, role)`
 table** and implement `BearerTokenValidator`.
@@ -200,12 +341,26 @@ Learned while building this; ignore at your peril.
 - **`verify_credentials`: `Ok(None)` = wrong password, `Err` = backend fault.**
   Don't return `Err` for bad credentials — the store maps `Ok(None)` to
   `InvalidCredentials`. Reserve `Err` for "the DB is down."
+- **Ending a session is two operations, deliberately.** `logout`
+  (`#[authenticated]`) ends the session you are calling with: it revokes that
+  access token and, when you pass the paired refresh token, deletes it — scoped
+  to your own handle, so a confused client cannot sign out a stranger.
+  `revoke_refresh_token` (`#[public]`) kills a refresh token with no live session
+  required, because the case it exists for is a session that can no longer
+  authenticate; possession of the token is the proof, exactly as for a
+  password-reset link, and it answers identically for unknown, expired and live
+  tokens so it cannot be used to probe which ones work.
 - **Session state is in-memory ⇒ effectively single-instance.** Refresh tokens
   and the revocation set live in the `CredentialStore` instance. Access-token
   *validation* is stateless (any instance with the same secret accepts a token),
   but **refresh rotation and logout-revocation do not cross instances** — a token
   revoked on host A still validates on host B until it expires. Run one instance,
-  or wait for the durable `SessionStore` seam (not yet built).
+  or wait for the durable `SessionStore` seam (not yet built). The same is true of
+  every stock store's revoked-access-token set: it is a process-local `HashSet`,
+  cleared on restart. A host that runs two nodes has to solve this above allex —
+  see the `revocation.rs` / `SanctionGate` pattern in the stasera backend, which
+  puts the token hashes in a table and a NOTIFY channel and consults an in-memory
+  copy in `validate_bearer`.
 - **`role` vs `profile`.** `role` is the coarse string `#[allowed_roles(..)]`
   gate; fine-grained permissions go in `profile`. If you authorize purely by
   profile, pass a constant `role` that satisfies your method annotations (or mark
