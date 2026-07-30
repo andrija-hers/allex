@@ -11,6 +11,19 @@ version number.
 ## [Unreleased]
 
 ### Fixed
+- **The registry turned "no caller" into a caller.** `Registry`'s dispatch did
+  `caller_role.unwrap_or("anonymous")` for its tracing span and then passed that
+  string *on* as `Some("anonymous")`, so an unauthenticated request reached the
+  permission gate wearing an identity. Harmless for the two older tiers — no role
+  list contains `"anonymous"` — but `#[authenticated]` accepts *any* role, so it
+  accepted nobody-at-all. Both `ModuleExecutor` and `RelayedModuleExecutor` now
+  pass the caller through exactly as it arrived, and the label stays in the span
+  where it belongs.
+
+  Worth knowing how it was found: the permission-table unit tests all passed,
+  because they call `is_authorized` directly. A live two-node smoke test asking an
+  anonymous caller to log out got **200**. The layer that decides was never the
+  layer under test.
 - **`IdentityV1::logout` was unreachable, and had been for as long as the role
   table has existed.** It carried no access-tier attribute, which the generated
   permission table reads as *nobody may call this* — so every logout over RPC
