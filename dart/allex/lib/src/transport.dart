@@ -43,11 +43,21 @@ class AllexAuthFailure {
 /// when null the transport behaves exactly as before.
 typedef AllexServerTimeObserver = void Function(DateTime serverUtc);
 
+/// Identifies the running client to the server, sent as `x-allex-client` on
+/// every call. By convention `platform/version+build`, e.g. `ios/1.0.2+42`.
+///
+/// Self-reported and unverified — a server must treat it as telemetry, never as
+/// a credential. It exists so a deployment can answer "which builds are still
+/// out there", which is what makes retiring a compatibility shim a decision
+/// rather than a guess.
+typedef AllexClientInfoProvider = String? Function();
+
 class AllexTransport {
   final Uri baseUri;
   final AllexBearerTokenProvider? bearerToken;
   final AllexBearerTokenRefresher? refreshBearerToken;
   final AllexServerTimeObserver? onServerTime;
+  final AllexClientInfoProvider? clientInfo;
   final http.Client _client;
 
   AllexTransport({
@@ -55,6 +65,7 @@ class AllexTransport {
     this.bearerToken,
     this.refreshBearerToken,
     this.onServerTime,
+    this.clientInfo,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
@@ -429,9 +440,11 @@ class AllexTransport {
 
   Future<Map<String, String>> _headers() async {
     final token = await bearerToken?.call();
+    final client = clientInfo?.call();
     return {
       'Content-Type': 'application/json',
       if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+      if (client != null && client.isNotEmpty) 'x-allex-client': client,
     };
   }
 }

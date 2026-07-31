@@ -45,6 +45,16 @@ pub struct CallerContext {
     /// `handle\x1erole` encoding, so this is fully backward compatible. Decode
     /// it into your own type via [`caller_profile`]; allex treats it as bytes.
     pub profile: Option<String>,
+    /// What the caller says it is — `platform/version+build`, e.g.
+    /// `ios/1.0.2+42` — from the `x-allex-client` header, when it sent one.
+    ///
+    /// Unlike every other field here this does **not** come from the validated
+    /// bearer token: the client picks the string, so it is telemetry and never a
+    /// credential. It is here because "which builds are still in the field" is
+    /// otherwise unanswerable, and that question gates retiring any
+    /// compatibility shim — see the payload legacy-write switch in
+    /// `allex-transport`.
+    pub client: Option<String>,
 }
 
 impl CallerContext {
@@ -70,6 +80,7 @@ impl CallerContext {
                     handle,
                     role,
                     profile,
+                    client: None,
                 }
             }
         }
@@ -99,6 +110,14 @@ pub fn caller_role() -> Option<String> {
 /// `caller_profile().and_then(|p| serde_json::from_str::<MyRights>(&p).ok())`.
 pub fn caller_profile() -> Option<String> {
     CALLER.try_with(|c| c.profile.clone()).ok().flatten()
+}
+
+/// Returns what the caller said it is for the current request, if it sent an
+/// `x-allex-client` header — `platform/version+build` by convention.
+///
+/// Self-reported. Record it, chart it, decide with it; never authorize on it.
+pub fn caller_client() -> Option<String> {
+    CALLER.try_with(|c| c.client.clone()).ok().flatten()
 }
 
 /// Marks the current RPC call as **access-denied**, so the server responds with a
@@ -177,7 +196,10 @@ where
         + 'static,
     C: UnaryCodec + Send + Sync + 'static,
 {
-    let ctx = CallerContext::parse(item.caller_role());
+    let mut ctx = CallerContext::parse(item.caller_role());
+    // Not part of the token-encoded caller string, so it is attached here rather
+    // than in `parse` — different provenance, different trust.
+    ctx.client = item.client_info().map(str::to_owned);
     let role = ctx.role.clone();
 
     let call = match item.get_payload().decode::<C, ModuleMethodCall>() {

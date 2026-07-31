@@ -37,10 +37,32 @@ impl<C: UnaryCodec> AxumTransport<C> {
 }
 
 /// Server-side handle for a single inbound Axum RPC request.
+/// Header a client may use to say what it is: `platform/version+build`, e.g.
+/// `ios/1.0.2+42`.
+///
+/// Self-reported and unverified by design — its purpose is to answer "what is
+/// actually installed out there", which is what turns retiring a compatibility
+/// shim into a decision backed by evidence instead of a guess. Anything security
+/// relevant belongs in the token, not here.
+pub const CLIENT_INFO_HEADER: &str = "x-allex-client";
+
+/// Reads [`CLIENT_INFO_HEADER`], bounded so a caller cannot push an arbitrary
+/// string into whatever the host records.
+fn client_info_of(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(CLIENT_INFO_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.chars().take(128).collect())
+}
+
 pub struct AxumOneShotItem {
     payload: Payload,
     response: tokio::sync::oneshot::Sender<AxumResponse>,
     caller_role: Option<String>,
+    /// Self-reported, from `X-Allex-Client`. Never used for authorization.
+    client_info: Option<String>,
 }
 
 impl ServerSideOneShotTransportItem for AxumOneShotItem {
@@ -85,6 +107,10 @@ impl ServerSideChunkedTransportItem for AxumOneShotItem {
 impl IdentityTransportItem for AxumOneShotItem {
     fn caller_role(&self) -> Option<&str> {
         self.caller_role.as_deref()
+    }
+
+    fn client_info(&self) -> Option<&str> {
+        self.client_info.as_deref()
     }
     // Agent Change 06/04/2026: respond_with_app_error now sends AxumResponse::AppError(payload) instead of Unary(payload), enabling HTTP 422 response.
 
@@ -135,6 +161,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
     /// Axum handler for `POST /rpc`.
     pub async fn handle_post(
         State(tx): State<mpsc::Sender<AxumOneShotItem>>,
+        headers: axum::http::HeaderMap,
         body: Bytes,
     ) -> Response {
         let request_span = debug_span!(
@@ -164,6 +191,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             payload,
             response: response_tx,
             caller_role: None,
+            client_info: client_info_of(&headers),
         };
 
         if tx.send(item).await.is_err() {
@@ -316,6 +344,7 @@ impl<C: UnaryCodec + Send + Sync + 'static> AxumTransport<C> {
             payload,
             response: response_tx,
             caller_role,
+            client_info: client_info_of(&headers),
         };
 
         if state.tx.send(item).await.is_err() {

@@ -14,6 +14,20 @@ pub trait IdentityTransportItem:
     /// Returns the authenticated caller role, if the transport established one.
     fn caller_role(&self) -> Option<&str>;
 
+    /// Returns the caller's **self-reported** client identifier, if it sent one —
+    /// by convention `platform/version+build`, e.g. `ios/1.0.2+42`.
+    ///
+    /// Unlike [`caller_role`](Self::caller_role) this is not validated by
+    /// anything: the client picks the string. It exists so a host can record
+    /// *which builds are actually in the field*, which is the difference between
+    /// retiring a compatibility shim on evidence and retiring it on a guess. It
+    /// must never reach an authorization decision.
+    ///
+    /// Defaults to `None`, so a transport that does not carry one needs no change.
+    fn client_info(&self) -> Option<&str> {
+        None
+    }
+
     /// Completes the request with an application-level error payload.
     fn respond_with_app_error(
         self,
