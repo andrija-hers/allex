@@ -132,9 +132,27 @@ one. So across the boundary:
 
 **There is no deploy ordering that avoids the gap.** Shipping the server first
 breaks installed clients; shipping the client first gets 400s from the old server.
-If you need a staged rollout, add the legacy-write switch described under
-"Planned" in `CHANGELOG.md` — the read paths already exist, so it is a few lines
-in `Payload::serialize`.
+
+**So use the switch — it exists, do not build another one.** `Payload::serialize`
+consults `legacy_payload_writes()`; turn it on and the server keeps writing the
+form clients already in the field can read. Set
+`ALLEX_LEGACY_PAYLOAD_WRITES=1` in the deployment's environment (no rebuild), or
+call `set_legacy_payload_writes(true)` if the host would rather own the decision.
+**Default off**, because the string form is 3.2–3.4× faster to encode and 3.1×
+smaller, and a project whose only client ships with its server has no
+compatibility window to buy.
+
+The sequence, and the order matters:
+
+1. deploy the server with legacy writes **on** — nothing breaks, old and new
+   clients are both readable and both readers already accept either form
+2. ship the client that reads both, and wait for it to actually propagate
+3. turn legacy writes **off** — now you get the fast wire
+
+**Step 2 is the one people get wrong**, because "wait for it to propagate" has no
+natural end and installed clients update on their users' schedule, not yours.
+That is what `caller_client()` is for (below): it tells you what is actually out
+there, so step 3 is a decision instead of a guess.
 
 ### Whether this affects your project: it is about deployment topology
 
@@ -144,8 +162,8 @@ can be running while the server is replaced**.
 | topology | exposure | what to do |
 |---|---|---|
 | Client is a static bundle served by the same host as the API (Flutter web, a Vite/Svelte SPA under a path) | **none** — they ship together | rebuild the client in the same deploy; worst case is a browser tab left open, fixed by a refresh |
-| Client is an installed native binary (Android/iOS app, desktop build) or lives behind an app-store review | **flag day** — every installed copy breaks when the server restarts | ship a client build first and give it time to propagate, or add the legacy-write switch; check whether your update prompt still works (a *static* manifest fetch survives; an RPC-based one does not) |
-| Third-party or hand-written consumer you do not rebuild | **flag day** | it must learn to read both forms, or you keep writing the legacy one |
+| Client is an installed native binary (Android/iOS app, desktop build) or lives behind an app-store review | **flag day** — every installed copy breaks when the server restarts | turn **on** `ALLEX_LEGACY_PAYLOAD_WRITES`, then follow the three steps above; also check whether your update prompt still works (a *static* manifest fetch survives; an RPC-based one does not — and on iOS there is no in-app update path at all, so a broken build is only fixable through another store round trip) |
+| Third-party or hand-written consumer you do not rebuild | **flag day** | it must learn to read both forms, or you leave legacy writes on permanently |
 
 As of 2026-07-30 the allex consumers in this workspace's neighbourhood are five
 client surfaces — four Flutter apps and one TypeScript console, all `path`
@@ -155,6 +173,33 @@ host that serves their API and carry no exposure. The one exception is a
 the one heading for app stores, where review latency makes client/server skew
 unavoidable. (The `allex` 2.x packages in some older JS projects are the unrelated
 legacy npm framework, not this wire.)
+
+### Knowing when it is safe to turn legacy writes off
+
+`caller_client()` (in `allex-serve`) returns what the calling client says it is —
+`platform/version+build` by convention, e.g. `ios/1.0.2+42` — taken from an
+`x-allex-client` header. On the client, pass a `clientInfo` provider to
+`AllexTransport` alongside `bearerToken`; it rides every call, unary and
+streaming.
+
+Record it wherever you already record liveness, aggregate by build, and step 3
+above becomes a number you read rather than a date you pick. Without it the
+realistic outcomes are flipping early and breaking people, or leaving the slow
+wire on forever because nobody can prove it is safe.
+
+Two properties worth keeping in mind:
+
+- **It is self-reported and unverified.** A client can claim anything. It is
+  telemetry, never a credential, and it must not reach an authorization decision.
+  That is why it is attached in `handle_request` rather than parsed from the
+  bearer-validated caller string like `handle`/`role`/`profile` — different
+  provenance, different trust.
+- **A client that sends nothing is indistinguishable from an old one**, which is
+  usually what you want: `None` means "predates this, assume the worst."
+
+`IdentityTransportItem::client_info()` defaults to `None`, so a transport that
+does not carry the header needs no change. Only the axum transport reads it, and
+it bounds the value at 128 characters.
 
 ### Symptoms of a mismatch
 

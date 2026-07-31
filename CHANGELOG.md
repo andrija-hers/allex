@@ -37,6 +37,30 @@ version number.
   below. `allex-identity` now asserts the permission table itself.
 
 ### Added
+- **`caller_client()` — what the calling client says it is**, e.g.
+  `ios/1.0.2+42`, sent as an `x-allex-client` header and carried on
+  `allex-serve`'s `CallerContext` beside `handle`, `role` and `profile`. On the
+  Dart side, pass a `clientInfo` provider to `AllexTransport` alongside
+  `bearerToken`; it rides every call, unary and streaming.
+
+  It exists because the legacy-write switch below is retired on a condition —
+  that no client in the field still reads only the old form — and nothing in
+  allex could answer that. A deployment could turn the shim on and then had no
+  way to learn when turning it off was safe, so the realistic outcomes were
+  flipping early and breaking people, or leaving the slow wire on forever.
+
+  **Self-reported and unverified**: a client can claim anything. Telemetry, never
+  a credential, and it must not reach an authorization decision. That is why it
+  is attached in `handle_request` rather than parsed from the bearer-validated
+  caller string like the other three fields — same struct, different provenance,
+  different trust. A client that sends nothing is indistinguishable from an old
+  one, which is the useful reading: `None` means "predates this, assume the
+  worst."
+
+  `IdentityTransportItem::client_info()` defaults to `None`, so a transport that
+  does not carry the header compiles untouched; only the axum transport reads it,
+  bounded at 128 characters. **Nothing in the dispatch path changed** — the
+  context `serve` already installs as a task-local gained a field.
 - **A legacy-write switch for the payload format**, which turns the wire break
   below into a staged rollout instead of a flag day. `Payload::serialize` consults
   `legacy_payload_writes()`; when on, human-readable formats emit the old array of
