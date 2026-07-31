@@ -203,56 +203,108 @@ class AllexTransport {
   /// Completes normally when the server sends a terminal `Success` frame or
   /// closes the stream. Throws [AllexError] on a terminal `Error` frame, a
   /// non-200 status, or a transport failure.
+  ///
+  /// ## Authorization is in-band here, unlike a unary call
+  ///
+  /// A unary call refused by the role gate comes back as **HTTP 403**, which
+  /// [_sendWithAuthRetry] turns into a token refresh and one retry. A streaming
+  /// call refused by the same gate comes back as **HTTP 200** with an in-band
+  /// `Error` frame carrying `AccessForbidden`: the server emits the denial as
+  /// the first item of the stream, so there is no status code to react to.
+  ///
+  /// Left alone, that is a silent, permanent outage. A caller whose token stops
+  /// validating — the server restarted with a fresh signing secret, say —
+  /// reconnects forever with the same dead token, is refused as `anonymous`
+  /// every time, and never refreshes, because nothing in the loop can tell an
+  /// authorization failure from a server that is merely unhappy. Observed as
+  /// exactly that: a dashboard retrying every 5s for 18 minutes until the page
+  /// was reloaded by hand.
+  ///
+  /// So the in-band denial is treated as what it is: refresh the token and
+  /// retry once, mirroring the unary path. A denial that survives the retry is
+  /// thrown as an [AllexError] tagged `httpStatus: 403`, so callers classifying
+  /// on status see "authentication required" rather than a generic drop. Only
+  /// the *first* frame can trigger this — once a frame has been yielded the
+  /// stream is established, and re-running it would replay state to the caller.
   Stream<dynamic> watchRaw(
     String module,
     String method,
     dynamic request,
   ) async* {
-    final streamed = await _sendWithAuthRetry(
-      module: module,
-      method: method,
-      body: _encodeRpcCall(module, method, request),
-    );
-    _noteServerTime(streamed.headers);
+    var mayRetryAuth = refreshBearerToken != null;
 
-    if (streamed.statusCode != 200) {
-      throw AllexError(
-        _httpErrorMessage(
-          streamed.statusCode,
-          module,
-          method,
-          await streamed.stream.bytesToString(),
-        ),
-        httpStatus: streamed.statusCode,
+    while (true) {
+      final streamed = await _sendWithAuthRetry(
+        module: module,
+        method: method,
+        body: _encodeRpcCall(module, method, request),
       );
-    }
+      _noteServerTime(streamed.headers);
 
-    final buffer = StringBuffer();
-    await for (final chunk in streamed.stream.transform(utf8.decoder)) {
-      buffer.write(chunk);
-      final text = buffer.toString();
-      final lines = text.split('\n');
-      for (final line in lines.sublist(0, lines.length - 1)) {
-        final trimmed = line.trim();
-        if (trimmed.isEmpty) continue;
-        final frame = jsonDecode(trimmed) as Map<String, dynamic>;
-        if (frame.containsKey('Progress')) {
-          yield _decodePayload(jsonEncode(frame['Progress']));
-        } else if (frame.containsKey('Success')) {
-          return;
-        } else if (frame.containsKey('Error')) {
-          final payload = _decodePayload(jsonEncode(frame['Error']));
-          throw AllexError(
-            'Stream error from $module/$method: '
-            '${payload is String ? payload : jsonEncode(payload)}',
-          );
-        }
+      if (streamed.statusCode != 200) {
+        throw AllexError(
+          _httpErrorMessage(
+            streamed.statusCode,
+            module,
+            method,
+            await streamed.stream.bytesToString(),
+          ),
+          httpStatus: streamed.statusCode,
+        );
       }
-      buffer
-        ..clear()
-        ..write(lines.last);
+
+      var yieldedAny = false;
+      var retryAfterRefresh = false;
+      final buffer = StringBuffer();
+      await for (final chunk in streamed.stream.transform(utf8.decoder)) {
+        buffer.write(chunk);
+        final text = buffer.toString();
+        final lines = text.split('\n');
+        for (final line in lines.sublist(0, lines.length - 1)) {
+          final trimmed = line.trim();
+          if (trimmed.isEmpty) continue;
+          final frame = jsonDecode(trimmed) as Map<String, dynamic>;
+          if (frame.containsKey('Progress')) {
+            yieldedAny = true;
+            yield _decodePayload(jsonEncode(frame['Progress']));
+          } else if (frame.containsKey('Success')) {
+            return;
+          } else if (frame.containsKey('Error')) {
+            final payload = _decodePayload(jsonEncode(frame['Error']));
+            final denied = _isAccessDenied(payload);
+            if (denied && mayRetryAuth && !yieldedAny) {
+              mayRetryAuth = false;
+              retryAfterRefresh = await refreshBearerToken!(
+                AllexAuthFailure(
+                  uri: baseUri,
+                  module: module,
+                  method: method,
+                  statusCode: 403,
+                ),
+              );
+              if (retryAfterRefresh) break;
+            }
+            throw AllexError(
+              'Stream error from $module/$method: '
+              '${payload is String ? payload : jsonEncode(payload)}',
+              httpStatus: denied ? 403 : null,
+            );
+          }
+        }
+        if (retryAfterRefresh) break;
+        buffer
+          ..clear()
+          ..write(lines.last);
+      }
+      if (!retryAfterRefresh) return;
     }
   }
+
+  /// Whether a terminal `Error` payload is the transport's authorization
+  /// refusal rather than an application error. The server encodes
+  /// `transport::Error::AccessForbidden` as the bare string.
+  static bool _isAccessDenied(dynamic payload) =>
+      payload is String && payload == 'AccessForbidden';
 
   /// Builds the request body: a payload nested in a payload, each one a JSON
   /// **string** rather than an array of byte values.

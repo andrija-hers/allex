@@ -37,6 +37,23 @@ version number.
   below. `allex-identity` now asserts the permission table itself.
 
 ### Added
+- **A legacy-write switch for the payload format**, which turns the wire break
+  below into a staged rollout instead of a flag day. `Payload::serialize` consults
+  `legacy_payload_writes()`; when on, human-readable formats emit the old array of
+  byte values that clients predating this release know how to read. Seeded once
+  from `ALLEX_LEGACY_PAYLOAD_WRITES` (`1`/`true`) so a deployment can set it
+  without a code change, and overridable at runtime via
+  `set_legacy_payload_writes`.
+
+  **Default off**, deliberately: the string form is 3.2–3.4× faster to encode and
+  3.1× smaller uncompressed, and a consumer whose only client is served by the
+  same host as its API has no compatibility window to buy. Turn it on where
+  clients are **installed** — an app behind store review, a sideloaded binary —
+  then: deploy with legacy writes on → ship clients that read both → turn it off.
+
+  The sequence matters because readers already accept both forms, so the break is
+  only ever in what a peer *writes*. That is also why the switch is enough on its
+  own: nothing else has to change on either side.
 - **`#[authenticated]` — the third access tier.** "Any caller whose token
   validated, whatever role it carries" was not expressible: there was
   `#[public]` (anyone, anonymous included) and `#[allowed_roles(..)]` (exact
@@ -144,12 +161,10 @@ version number.
   version — both it and the Rust workspace still read `0.1.0`, so a Flutter
   consumer has no way to tell which payload form its copy speaks. The package
   version is the only signal those consumers get.
-- **Considered, not built: a legacy-write switch.** Emitting the array form on
-  demand (an `AtomicBool` consulted in `Payload::serialize`, ~5 lines, since both
-  read paths already exist) turns the wire break into a staged rollout: deploy with
-  legacy writes on → ship clients that read both → flip the switch → delete it a
-  release later. Worth having before a consumer ships to an app store, where review
-  latency puts days between a client release and a server release.
+- **Retiring the legacy-write switch.** It is `Added` in this release (below).
+  Once every consumer's installed clients read both forms, the switch and the
+  `visit_seq` read path can both go — but not before, and the way to know is
+  client-version telemetry rather than a guess.
 
 ## [0.1.0] - 2026-07-13
 

@@ -77,6 +77,10 @@ class LiveStateRepository<S> {
   bool _disposed = false;
   bool _started = false;
 
+  /// Completes to cut the current backoff short (see [reconnectNow]); null
+  /// whenever the loop is not waiting between attempts.
+  Completer<void>? _backoff;
+
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
@@ -141,6 +145,16 @@ class LiveStateRepository<S> {
     _runLoop();
   }
 
+  /// Cuts the wait before the next connection attempt, so a "retry now" control
+  /// does something immediate instead of leaving the user to guess whether the
+  /// backoff has elapsed. Safe to call at any time: while connected, or several
+  /// times over, it does nothing.
+  void reconnectNow() {
+    if (_disposed) return;
+    final waiter = _backoff;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+  }
+
   void _setStatus(AllexLiveStatus next) {
     if (_status == next) return;
     _status = next;
@@ -173,7 +187,15 @@ class LiveStateRepository<S> {
         _lastError = error;
       }
       if (_disposed) break;
-      await Future<void>.delayed(_reconnectDelay);
+      // Interruptible backoff: whichever comes first, the delay elapsing or
+      // [reconnectNow] being called.
+      final waiter = Completer<void>();
+      _backoff = waiter;
+      await Future.any<void>([
+        Future<void>.delayed(_reconnectDelay),
+        waiter.future,
+      ]);
+      _backoff = null;
     }
   }
 

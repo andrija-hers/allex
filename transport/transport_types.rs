@@ -1,4 +1,50 @@
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// Whether human-readable formats write the **legacy** payload form: one JSON
+/// number per byte, instead of a string.
+///
+/// This exists for one situation, and it is worth naming precisely: a project
+/// whose clients are **installed** rather than served — an app behind store
+/// review, a sideloaded binary in the field. Readers accept both forms, so the
+/// break is only ever in what a peer *writes*, and both directions break at once
+/// (an old client cannot read a new server's reply; a new client's request is
+/// rejected by an old server). There is no deploy ordering that avoids the gap —
+/// but there is a switch: deploy the server writing the legacy form, ship the
+/// client that reads both, then flip this off and delete it a release later.
+///
+/// Seeded once from `ALLEX_LEGACY_PAYLOAD_WRITES` (`1` or `true`), so a
+/// deployment can turn it on without a code change, and overridable at runtime
+/// via [`set_legacy_payload_writes`] for tests and for hosts that would rather
+/// configure it themselves.
+///
+/// **Default off.** The string form is 3.2–3.4× faster to encode and 3.1× smaller
+/// uncompressed; a consumer with no installed clients — anything served by the
+/// same host as its API — should never pay for a compatibility window it does not
+/// have.
+static LEGACY_PAYLOAD_WRITES: OnceLock<AtomicBool> = OnceLock::new();
+
+fn legacy_writes_cell() -> &'static AtomicBool {
+    LEGACY_PAYLOAD_WRITES.get_or_init(|| {
+        AtomicBool::new(matches!(
+            std::env::var("ALLEX_LEGACY_PAYLOAD_WRITES").as_deref(),
+            Ok("1") | Ok("true")
+        ))
+    })
+}
+
+/// Whether payloads are currently written in the legacy array-of-bytes form.
+pub fn legacy_payload_writes() -> bool {
+    legacy_writes_cell().load(Ordering::Relaxed)
+}
+
+/// Turns the legacy payload form on or off for this process, overriding the
+/// environment. Takes effect on the next value serialized.
+pub fn set_legacy_payload_writes(on: bool) {
+    legacy_writes_cell().store(on, Ordering::Relaxed);
+}
 
 /// Opaque serialized payload exchanged across transports.
 ///
@@ -15,7 +61,9 @@ pub struct Payload(Vec<u8>);
 impl Serialize for Payload {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         match (serializer.is_human_readable(), std::str::from_utf8(&self.0)) {
-            (true, Ok(text)) => serializer.serialize_str(text),
+            // `legacy_payload_writes()` forces the array form even here, for a
+            // deployment still serving clients that predate the string encoding.
+            (true, Ok(text)) if !legacy_payload_writes() => serializer.serialize_str(text),
             // Binary formats, and the rare non-UTF-8 payload, keep the byte
             // sequence — for JSON that is the old array form, which
             // `Deserialize` still accepts.
@@ -299,11 +347,54 @@ impl From<std::convert::Infallible> for Never {
 mod payload_wire_tests {
     use super::*;
 
+    /// The legacy-write flag is process-global, so every test that toggles it —
+    /// or that asserts the form it selects — takes this lock first. Cargo runs
+    /// tests in threads within one binary, so without it the switch test below
+    /// would flip the wire form underneath a concurrently running one.
+    static FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_flag() -> std::sync::MutexGuard<'static, ()> {
+        FLAG_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn json_carries_a_payload_as_a_string_not_a_byte_array() {
+        let _guard = lock_flag();
         let payload = Payload::new(br#"{"frame":"initial"}"#);
         let json = serde_json::to_string(&payload).expect("serialize");
         assert_eq!(json, r#""{\"frame\":\"initial\"}""#);
+    }
+
+    /// The staged-rollout path: a server can be told to keep writing the form
+    /// that clients already in the field know how to read.
+    #[test]
+    fn the_legacy_write_switch_puts_the_array_form_back_on_the_wire() {
+        let _guard = lock_flag();
+        let payload = Payload::new(br#"{"a":1}"#);
+
+        // Set explicitly rather than asserting the default: the default is
+        // seeded from the environment, and a test must not fail because the
+        // machine running it happens to export the variable.
+        set_legacy_payload_writes(false);
+        assert_eq!(
+            serde_json::to_string(&payload).expect("serialize"),
+            r#""{\"a\":1}""#
+        );
+
+        set_legacy_payload_writes(true);
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json, "[123,34,97,34,58,49,125]");
+
+        // Still readable by a peer on either form — which is the whole point:
+        // the switch stages the rollout instead of introducing a second break.
+        let back: Payload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.get_bytes(), payload.get_bytes());
+
+        set_legacy_payload_writes(false);
+        assert_eq!(
+            serde_json::to_string(&payload).expect("serialize"),
+            r#""{\"a\":1}""#
+        );
     }
 
     /// The size claim, on a payload the size of a real snapshot rather than a
@@ -311,6 +402,7 @@ mod payload_wire_tests {
     /// (plus an escape per quote).
     #[test]
     fn the_string_form_is_a_fraction_of_the_array_form() {
+        let _guard = lock_flag();
         let row = r#"{"schedule_id":"example::DAILY_DIVIDENDS","status":"Processed"},"#;
         let payload = Payload::new(row.repeat(2000).as_bytes());
         let string_form = serde_json::to_string(&payload).expect("serialize").len();
