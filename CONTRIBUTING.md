@@ -15,7 +15,21 @@ allex is **solo-maintained and offered as-is**. Contributions are welcome, but:
 
 ## Before you open a pull request
 
-Run the same gates CI runs:
+Run every gate with one command:
+
+```sh
+scripts/ci.sh           # everything
+scripts/ci.sh --rust    # Rust only
+scripts/ci.sh --dart    # the Dart package only
+```
+
+That covers `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+-- -D warnings`, the workspace tests, the Postgres integration tests (only when
+a usable Docker is present — they need testcontainers), and `dart analyze` plus
+`dart test` for `dart/allex`. Anything it could not run is reported as a `SKIP`
+rather than folded into a pass, so a green summary means what it says.
+
+The equivalent by hand:
 
 ```sh
 cargo fmt --all --check

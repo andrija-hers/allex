@@ -1,6 +1,12 @@
 # Woodpecker CI for Codeberg — https://woodpecker-ci.org
 # Gates every push and pull request on format, lints, and tests.
 #
+# NOTE: Codeberg gates CI behind a manual approval request, which has not been
+# made — so this pipeline has never run. `scripts/ci.sh` runs the same gates
+# locally on demand and is what CONTRIBUTING.md points contributors at. It also
+# covers two things these steps do not: the Postgres integration tests (when
+# Docker is up) and the `dart/allex` package. Keep the two in step.
+#
 # The pinned toolchain (1.97) equals allex's current MSRV (rust-version in
 # Cargo.toml), so this whole pipeline doubles as the MSRV gate. If the MSRV is
 # later minimized below the toolchain used for fmt/clippy/test, add a separate
