@@ -59,7 +59,10 @@ pub fn set_legacy_payload_writes(on: bool) {
 pub struct Payload(Vec<u8>);
 
 impl Serialize for Payload {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         match (serializer.is_human_readable(), std::str::from_utf8(&self.0)) {
             // `legacy_payload_writes()` forces the array form even here, for a
             // deployment still serving clients that predate the string encoding.
@@ -73,7 +76,9 @@ impl Serialize for Payload {
 }
 
 impl<'de> Deserialize<'de> for Payload {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         struct PayloadVisitor;
 
         impl<'de> serde::de::Visitor<'de> for PayloadVisitor {
@@ -83,15 +88,24 @@ impl<'de> Deserialize<'de> for Payload {
                 formatter.write_str("a payload as a string, byte array, or sequence of bytes")
             }
 
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Payload, E> {
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Payload, E> {
                 Ok(Payload(value.as_bytes().to_vec()))
             }
 
-            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> std::result::Result<Payload, E> {
+            fn visit_bytes<E: serde::de::Error>(
+                self,
+                value: &[u8],
+            ) -> std::result::Result<Payload, E> {
                 Ok(Payload(value.to_vec()))
             }
 
-            fn visit_byte_buf<E: serde::de::Error>(self, value: Vec<u8>) -> std::result::Result<Payload, E> {
+            fn visit_byte_buf<E: serde::de::Error>(
+                self,
+                value: Vec<u8>,
+            ) -> std::result::Result<Payload, E> {
                 Ok(Payload(value))
             }
 
@@ -354,7 +368,9 @@ mod payload_wire_tests {
     static FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn lock_flag() -> std::sync::MutexGuard<'static, ()> {
-        FLAG_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        FLAG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]

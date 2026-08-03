@@ -170,7 +170,9 @@ impl<C: UnaryCodec + Send + Sync + 'static> ServiceHost<C> {
     /// [`BearerTokenValidator`].
     pub fn into_router_with_auth(self, validator: Arc<dyn BearerTokenValidator>) -> RpcService {
         let transport = AxumTransport::<C>::new(self.buffer);
-        let router = transport.router_with_auth(validator).layer(compression_layer());
+        let router = transport
+            .router_with_auth(validator)
+            .layer(compression_layer());
         let dispatch = tokio::spawn(serve_dispatch::<AxumTransport<C>, C>(
             transport,
             self.registry,
@@ -249,9 +251,7 @@ mod compression_tests {
             )
             .route(
                 "/stream",
-                get(|| async move {
-                    ([(CONTENT_TYPE, "application/x-ndjson")], stream_body)
-                }),
+                get(|| async move { ([(CONTENT_TYPE, "application/x-ndjson")], stream_body) }),
             )
             .layer(compression_layer());
         let server = tokio::spawn(async move {

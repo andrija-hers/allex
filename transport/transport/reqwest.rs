@@ -447,10 +447,8 @@ mod tests {
         // today's encoder: old servers serialized the `Payload` newtype as a
         // JSON array of bytes. Encoding it with the current codec would emit
         // the modern string form and quietly stop testing the legacy path.
-        let encoded_payload = serde_json::to_vec(
-            &br#""InvalidCredentials""#.to_vec(),
-        )
-        .expect("legacy array form");
+        let encoded_payload =
+            serde_json::to_vec(&br#""InvalidCredentials""#.to_vec()).expect("legacy array form");
         let app = Router::new().route(
             "/rpc",
             post(move || {
