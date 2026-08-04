@@ -52,12 +52,27 @@ typedef AllexServerTimeObserver = void Function(DateTime serverUtc);
 /// rather than a guess.
 typedef AllexClientInfoProvider = String? Function();
 
+/// Called when a **streaming** call's link changes: `true` once a subscribe is
+/// live (HTTP 200, frames can flow), `false` when it drops and the transport
+/// starts its silent retry loop.
+///
+/// [AllexTransport.callStreaming] reconnects forever and reports nothing while it
+/// does — by design, so a consumer isn't asked to write a retry loop. The cost is
+/// that a dead server and an idle one look **identical** from the stream: no
+/// error, and on a quiet feed no frames either. A UI then keeps rendering its
+/// last snapshot as though it were current, which is the failure mode where
+/// everything looks healthy and nothing is. Silence cannot be interpreted; this
+/// observer is what makes the difference observable. Optional and additive — when
+/// null the transport behaves exactly as before.
+typedef AllexStreamLiveObserver = void Function(bool live);
+
 class AllexTransport {
   final Uri baseUri;
   final AllexBearerTokenProvider? bearerToken;
   final AllexBearerTokenRefresher? refreshBearerToken;
   final AllexServerTimeObserver? onServerTime;
   final AllexClientInfoProvider? clientInfo;
+  final AllexStreamLiveObserver? onStreamLive;
   final http.Client _client;
 
   AllexTransport({
@@ -66,6 +81,7 @@ class AllexTransport {
     this.refreshBearerToken,
     this.onServerTime,
     this.clientInfo,
+    this.onStreamLive,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
@@ -139,6 +155,9 @@ class AllexTransport {
       };
 
       while (!isCanceled) {
+        // Whether this iteration already reported the link down (the catch path),
+        // so the fall-through below doesn't report it a second time.
+        var announcedDown = false;
         try {
           final streamed = await _sendWithAuthRetry(
             module: module,
@@ -158,6 +177,9 @@ class AllexTransport {
               httpStatus: streamed.statusCode,
             );
           }
+          // Subscribed: frames can flow. Re-announced on every reconnect, so a
+          // consumer that only ever sees `true` has simply never lost the link.
+          onStreamLive?.call(true);
 
           final buffer = StringBuffer();
           await for (final chunk in streamed.stream.transform(utf8.decoder)) {
@@ -188,15 +210,24 @@ class AllexTransport {
               ..write(lines.last);
           }
         } on AllexError {
+          onStreamLive?.call(false);
           rethrow;
         } catch (_) {
           if (isCanceled) return;
+          // The link died mid-stream (server gone, socket reset, DNS): say so
+          // before going quiet for the retry, or the consumer cannot tell this
+          // from a feed with nothing to report.
+          onStreamLive?.call(false);
+          announcedDown = true;
           await Future<void>.delayed(const Duration(seconds: 2));
         }
         if (isCanceled) {
           await controller.close();
           return;
         }
+        // Not via the catch: the response body ended without a terminal frame —
+        // the server closed an open subscription. Same ambiguity, same signal.
+        if (!announcedDown) onStreamLive?.call(false);
         await Future<void>.delayed(const Duration(seconds: 1));
       }
 

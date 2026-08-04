@@ -339,5 +339,61 @@ void main() {
         4,
       );
     });
+
+    // The retry loop is deliberately invisible to the stream's consumer, which leaves a dead server
+    // and an idle one looking identical: no error, and on a quiet feed no frames either. A UI that
+    // cannot tell them apart goes on presenting a stale snapshot as if it were live. `onStreamLive`
+    // is the only thing that separates them, so its edges are a contract rather than a detail — and
+    // a *missing* `false` is the one that hides an outage.
+    test('reports the link live on subscribe and down when it drops', () async {
+      final progressFrame = jsonEncode({
+        'Progress': jsonDecode(_wrap({'currently_at': 1})),
+      });
+      final successFrame = jsonEncode({
+        'Success': jsonDecode(_wrap({'total': 4})),
+      });
+      final client = _QueueClient([
+        // Connects, delivers a frame, then the connection dies mid-stream.
+        (_) async => _brokenResponse('$progressFrame\n'),
+        // The transport retries on its own; this attempt completes the call.
+        (_) async => _chunkedResponse(200, ['$successFrame\n']),
+      ]);
+      final live = <bool>[];
+      final transport = AllexTransport(
+        baseUri: Uri.parse('http://localhost/rpc'),
+        client: client,
+        onStreamLive: live.add,
+      );
+
+      await transport
+          .callStreaming<_CountStep, _StepsMade, String>(
+            module: 'arithmetic_v_1',
+            method: 'count',
+            request: {'from': 1, 'to': 4},
+            decodeProgress: _CountStep.fromJson,
+            decodeSuccess: _StepsMade.fromJson,
+            decodeError: (json) => json as String,
+          )
+          .toList();
+
+      expect(live, [true, false, true]);
+    });
   });
+}
+
+/// A 200 response that yields `chunk` and then fails, standing in for a server that goes away
+/// mid-subscription (the case the transport swallows into its retry loop).
+http.StreamedResponse _brokenResponse(String chunk) {
+  final controller = StreamController<List<int>>();
+  controller
+    ..add(utf8.encode(chunk))
+    // Not a SocketException: this package is web-safe, so the test stays off `dart:io`. The transport
+    // treats any non-`AllexError` the same way.
+    ..addError(StateError('connection reset'))
+    ..close();
+  return http.StreamedResponse(
+    controller.stream,
+    200,
+    headers: const {'content-type': 'application/x-ndjson'},
+  );
 }
