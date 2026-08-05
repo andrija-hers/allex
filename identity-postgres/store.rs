@@ -639,6 +639,64 @@ impl AccountStore for PostgresIdentityStore {
         }
     }
 
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, IdentityError> {
+        let client = self.db.get_client().await.map_err(db_err)?;
+        let rows = client
+            .query("SELECT handle, role FROM users ORDER BY handle", &[])
+            .await
+            .map_err(db_err)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AccountRecord {
+                    handle: row.try_get("handle").map_err(db_err)?,
+                    role: row.try_get("role").map_err(db_err)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn set_role(&self, handle: &str, role: &str) -> Result<(), IdentityError> {
+        let mut client = self.db.get_client().await.map_err(db_err)?;
+        let tx = client.transaction().await.map_err(db_err)?;
+        let affected = tx
+            .execute(
+                "UPDATE users SET role = $1 WHERE handle = $2",
+                &[&role, &handle],
+            )
+            .await
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Err(IdentityError::UserNotFound);
+        }
+        // Same transaction as the update: a role change that left the old
+        // refresh tokens behind would be refreshable straight back.
+        tx.execute("DELETE FROM refresh_tokens WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn delete_account(&self, handle: &str) -> Result<(), IdentityError> {
+        let mut client = self.db.get_client().await.map_err(db_err)?;
+        let tx = client.transaction().await.map_err(db_err)?;
+        // Explicit, not left to the schema's ON DELETE CASCADE: the other stores
+        // cannot rely on theirs, and a stranded refresh token is a deleted
+        // account that can still mint sessions.
+        tx.execute("DELETE FROM refresh_tokens WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?;
+        let affected = tx
+            .execute("DELETE FROM users WHERE handle = $1", &[&handle])
+            .await
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Err(IdentityError::UserNotFound);
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
     async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
         let client = self.db.get_client().await.map_err(db_err)?;
         let row = client

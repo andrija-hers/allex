@@ -142,6 +142,20 @@ impl<I: AccountStore + Send + Sync> AccountStore for RegistrationGuard<I> {
         self.inner.get_account(handle).await
     }
 
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, IdentityError> {
+        self.inner.list_accounts().await
+    }
+
+    async fn set_role(&self, handle: &str, role: &str) -> Result<(), IdentityError> {
+        // The guard constrains *self-registration*, not administration: an
+        // operator granting a role has already been authorized by the caller.
+        self.inner.set_role(handle, role).await
+    }
+
+    async fn delete_account(&self, handle: &str) -> Result<(), IdentityError> {
+        self.inner.delete_account(handle).await
+    }
+
     async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
         self.inner.issue_session(handle).await
     }

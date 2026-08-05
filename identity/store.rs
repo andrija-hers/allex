@@ -388,6 +388,42 @@ impl AccountStore for InMemoryIdentityStore {
         }))
     }
 
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, IdentityError> {
+        let users = self.0.users.lock().await;
+        let mut accounts: Vec<AccountRecord> = users
+            .iter()
+            .map(|(handle, u)| AccountRecord {
+                handle: handle.clone(),
+                role: u.role.clone(),
+            })
+            .collect();
+        accounts.sort_by(|a, b| a.handle.cmp(&b.handle));
+        Ok(accounts)
+    }
+
+    async fn set_role(&self, handle: &str, role: &str) -> Result<(), IdentityError> {
+        {
+            let mut users = self.0.users.lock().await;
+            match users.get_mut(handle) {
+                Some(u) => u.role = role.to_owned(),
+                None => return Err(IdentityError::UserNotFound),
+            }
+        }
+        // Refresh tokens carry the role they were minted with; leaving them would
+        // let a demotion be refreshed away. See the trait docs.
+        self.revoke_sessions(handle).await
+    }
+
+    async fn delete_account(&self, handle: &str) -> Result<(), IdentityError> {
+        {
+            let mut users = self.0.users.lock().await;
+            if users.remove(handle).is_none() {
+                return Err(IdentityError::UserNotFound);
+            }
+        }
+        self.revoke_sessions(handle).await
+    }
+
     async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
         let role = {
             let users = self.0.users.lock().await;
@@ -506,6 +542,128 @@ mod account_store_tests {
         let session = store.issue_session("erin").await.unwrap();
         let refresh_token = session.refresh_token.clone().unwrap();
         store.revoke_sessions("erin").await.unwrap();
+        assert!(matches!(
+            store.refresh(RefreshRequest { refresh_token }).await,
+            Err(IdentityError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_accounts_returns_every_account_ordered_by_handle() {
+        let store = InMemoryIdentityStore::new("test-secret");
+        for (handle, role) in [("zoe", "user"), ("adam", "admin"), ("mia", "operator")] {
+            store
+                .register(RegisterRequest {
+                    handle: handle.into(),
+                    password: "pw".into(),
+                    role: role.into(),
+                })
+                .await
+                .unwrap();
+        }
+        let accounts = store.list_accounts().await.unwrap();
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|a| (a.handle.as_str(), a.role.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("adam", "admin"), ("mia", "operator"), ("zoe", "user")]
+        );
+        // An empty store is an empty list, not an error.
+        assert!(
+            InMemoryIdentityStore::new("test-secret")
+                .list_accounts()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_role_changes_the_role_and_reports_unknown_user() {
+        let store = store_with_user("frank", "pw", "user").await;
+        store.set_role("frank", "operator").await.unwrap();
+        assert_eq!(
+            store.get_account("frank").await.unwrap().unwrap().role,
+            "operator"
+        );
+        // A fresh login carries the new role.
+        let tokens = store
+            .login(LoginRequest {
+                handle: "frank".into(),
+                password: "pw".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tokens.role, "operator");
+        assert!(matches!(
+            store.set_role("ghost", "operator").await,
+            Err(IdentityError::UserNotFound)
+        ));
+    }
+
+    // The demotion hole: a refresh token remembers the role it was minted with,
+    // so unless set_role drops it, the demoted user refreshes straight back into
+    // the role they just lost.
+    #[tokio::test]
+    async fn set_role_revokes_refresh_tokens_so_a_demotion_cannot_be_refreshed_away() {
+        let store = store_with_user("grace", "pw", "admin").await;
+        let refresh_token = store
+            .issue_session("grace")
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+        store.set_role("grace", "user").await.unwrap();
+        assert!(matches!(
+            store.refresh(RefreshRequest { refresh_token }).await,
+            Err(IdentityError::InvalidRefreshToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_account_removes_the_user_and_reports_unknown_user() {
+        let store = store_with_user("henry", "pw", "user").await;
+        store.delete_account("henry").await.unwrap();
+        assert!(store.get_account("henry").await.unwrap().is_none());
+        assert!(matches!(
+            store
+                .login(LoginRequest {
+                    handle: "henry".into(),
+                    password: "pw".into(),
+                })
+                .await,
+            Err(IdentityError::InvalidCredentials)
+        ));
+        assert!(
+            !store
+                .list_accounts()
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.handle == "henry")
+        );
+        // Deleting twice is an error, not a silent no-op: the caller can tell a
+        // real deletion from nothing happening.
+        assert!(matches!(
+            store.delete_account("henry").await,
+            Err(IdentityError::UserNotFound)
+        ));
+    }
+
+    // `refresh` reads the token's own row for handle+role and does not re-check
+    // that the user still exists — so a stranded token is a deleted account that
+    // can still mint sessions.
+    #[tokio::test]
+    async fn delete_account_revokes_refresh_tokens_so_a_deleted_user_cannot_mint_sessions() {
+        let store = store_with_user("iris", "pw", "user").await;
+        let refresh_token = store
+            .issue_session("iris")
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+        store.delete_account("iris").await.unwrap();
         assert!(matches!(
             store.refresh(RefreshRequest { refresh_token }).await,
             Err(IdentityError::InvalidRefreshToken)

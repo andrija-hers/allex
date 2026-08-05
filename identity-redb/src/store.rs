@@ -654,6 +654,108 @@ impl AccountStore for RedbIdentityStore {
         }))
     }
 
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, IdentityError> {
+        let db = self.database.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AccountRecord>, IdentityError> {
+            let read_tx = db
+                .begin_read()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            let table = read_tx
+                .open_table(USERS_TABLE)
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            let mut accounts = Vec::new();
+            // redb iterates its key range in order, so the handle ordering the
+            // trait promises comes for free.
+            let iter = table
+                .iter()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            for entry in iter {
+                let (key, value) = entry.map_err(|e| IdentityError::Internal(e.to_string()))?;
+                let stored: StoredUser = serde_json::from_slice(value.value())
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                accounts.push(AccountRecord {
+                    handle: key.value().to_owned(),
+                    role: stored.role,
+                });
+            }
+            Ok(accounts)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn set_role(&self, handle: &str, role: &str) -> Result<(), IdentityError> {
+        let db = self.database.clone();
+        let handle = handle.to_owned();
+        let role = role.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let write_tx = db
+                .begin_write()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            {
+                let mut table = write_tx
+                    .open_table(USERS_TABLE)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                let mut stored: StoredUser = {
+                    let Some(value) = table
+                        .get(handle.as_str())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?
+                    else {
+                        return Err(IdentityError::UserNotFound);
+                    };
+                    serde_json::from_slice(value.value())
+                        .map_err(|e| IdentityError::Internal(e.to_string()))?
+                };
+                stored.role = role;
+                let encoded = serde_json::to_vec(&stored)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                table
+                    .insert(handle.as_str(), encoded.as_slice())
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            }
+            // Same write transaction as the role change: a demotion whose old
+            // refresh tokens survive can be refreshed straight back.
+            remove_refresh_tokens_for_sync(&write_tx, &handle)?;
+            write_tx
+                .commit()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn delete_account(&self, handle: &str) -> Result<(), IdentityError> {
+        let db = self.database.clone();
+        let handle = handle.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let write_tx = db
+                .begin_write()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            {
+                let mut table = write_tx
+                    .open_table(USERS_TABLE)
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
+                if table
+                    .remove(handle.as_str())
+                    .map_err(|e| IdentityError::Internal(e.to_string()))?
+                    .is_none()
+                {
+                    return Err(IdentityError::UserNotFound);
+                }
+            }
+            // redb has no foreign keys at all, so the tokens can only go
+            // explicitly — and they must, or a deleted handle keeps refreshing.
+            remove_refresh_tokens_for_sync(&write_tx, &handle)?;
+            write_tx
+                .commit()
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
     async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
         let db = self.database.clone();
         let handle_owned = handle.to_owned();
@@ -692,31 +794,7 @@ impl AccountStore for RedbIdentityStore {
             let write_tx = db
                 .begin_write()
                 .map_err(|e| IdentityError::Internal(e.to_string()))?;
-            {
-                let mut table = write_tx
-                    .open_table(REFRESH_TOKENS_TABLE)
-                    .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                let mut to_remove: Vec<String> = Vec::new();
-                {
-                    let iter = table
-                        .iter()
-                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                    for entry in iter {
-                        let (key, value) =
-                            entry.map_err(|e| IdentityError::Internal(e.to_string()))?;
-                        let stored: StoredRefreshToken = serde_json::from_slice(value.value())
-                            .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                        if stored.handle == handle {
-                            to_remove.push(key.value().to_owned());
-                        }
-                    }
-                }
-                for token in to_remove {
-                    table
-                        .remove(token.as_str())
-                        .map_err(|e| IdentityError::Internal(e.to_string()))?;
-                }
-            }
+            remove_refresh_tokens_for_sync(&write_tx, &handle)?;
             write_tx
                 .commit()
                 .map_err(|e| IdentityError::Internal(e.to_string()))?;
@@ -725,6 +803,42 @@ impl AccountStore for RedbIdentityStore {
         .await
         .map_err(|e| IdentityError::Internal(e.to_string()))?
     }
+}
+
+/// Removes every refresh token belonging to `handle` inside an already-open write transaction
+/// (synchronous; call from `spawn_blocking`). Shared by `revoke_sessions`, `set_role` and
+/// `delete_account` so all three drop tokens the same way — and so the latter two can do it in the
+/// *same* transaction as the change that makes those tokens dangerous.
+///
+/// redb has no secondary index on `handle`, so this scans the token table. Sized for the number of
+/// live sessions, not the number of users.
+fn remove_refresh_tokens_for_sync(
+    write_tx: &redb::WriteTransaction,
+    handle: &str,
+) -> Result<(), IdentityError> {
+    let mut table = write_tx
+        .open_table(REFRESH_TOKENS_TABLE)
+        .map_err(|e| IdentityError::Internal(e.to_string()))?;
+    let mut to_remove: Vec<String> = Vec::new();
+    {
+        let iter = table
+            .iter()
+            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+        for entry in iter {
+            let (key, value) = entry.map_err(|e| IdentityError::Internal(e.to_string()))?;
+            let stored: StoredRefreshToken = serde_json::from_slice(value.value())
+                .map_err(|e| IdentityError::Internal(e.to_string()))?;
+            if stored.handle == handle {
+                to_remove.push(key.value().to_owned());
+            }
+        }
+    }
+    for token in to_remove {
+        table
+            .remove(token.as_str())
+            .map_err(|e| IdentityError::Internal(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Reads and deserializes a user record from redb (synchronous; call from `spawn_blocking`).

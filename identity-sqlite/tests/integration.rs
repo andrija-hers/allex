@@ -8,8 +8,8 @@
 
 use allex_identity_sqlite::SqliteIdentityStore;
 use identity::{
-    IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest,
-    ValidateRequest,
+    AccountStore, IdentityError, IdentityV1, LoginRequest, LogoutRequest, RefreshRequest,
+    RegisterRequest, ValidateRequest,
 };
 use message_templates::{
     ForgotPasswordMessageRequest, TemplateChannel, UpsertMessageTemplateRequest,
@@ -265,4 +265,114 @@ async fn forgot_password_template_is_loaded_from_storage() {
         msg.message,
         "Hi alice, reset password via https://example/reset?t=abc"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AccountStore: list / set_role / delete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_accounts_returns_every_account_ordered_by_handle() {
+    let (store, _dir) = start_store().await;
+    for (handle, role) in [("zoe", "user"), ("adam", "admin"), ("mia", "operator")] {
+        store
+            .register(RegisterRequest {
+                handle: handle.into(),
+                password: "pw".into(),
+                role: role.into(),
+            })
+            .await
+            .unwrap();
+    }
+    let accounts = store.list_accounts().await.unwrap();
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|a| (a.handle.as_str(), a.role.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("adam", "admin"), ("mia", "operator"), ("zoe", "user")]
+    );
+}
+
+#[tokio::test]
+async fn set_role_changes_the_role_and_reports_unknown_user() {
+    let (store, _dir) = start_store().await;
+    store.register(reg("frank", "pw")).await.unwrap();
+    store.set_role("frank", "operator").await.unwrap();
+    assert_eq!(
+        store.get_account("frank").await.unwrap().unwrap().role,
+        "operator"
+    );
+    assert_eq!(
+        store.login(login("frank", "pw")).await.unwrap().role,
+        "operator"
+    );
+    assert!(matches!(
+        store.set_role("ghost", "operator").await,
+        Err(IdentityError::UserNotFound)
+    ));
+}
+
+// A refresh token remembers the role it was minted with, so unless set_role
+// drops it, a demoted user refreshes straight back into the role they lost.
+#[tokio::test]
+async fn set_role_revokes_refresh_tokens_so_a_demotion_cannot_be_refreshed_away() {
+    let (store, _dir) = start_store().await;
+    store
+        .register(RegisterRequest {
+            handle: "grace".into(),
+            password: "pw".into(),
+            role: "admin".into(),
+        })
+        .await
+        .unwrap();
+    let refresh_token = store
+        .issue_session("grace")
+        .await
+        .unwrap()
+        .refresh_token
+        .unwrap();
+    store.set_role("grace", "user").await.unwrap();
+    assert!(matches!(
+        store.refresh(RefreshRequest { refresh_token }).await,
+        Err(IdentityError::InvalidRefreshToken)
+    ));
+}
+
+#[tokio::test]
+async fn delete_account_removes_the_user_and_reports_unknown_user() {
+    let (store, _dir) = start_store().await;
+    store.register(reg("henry", "pw")).await.unwrap();
+    store.delete_account("henry").await.unwrap();
+    assert!(store.get_account("henry").await.unwrap().is_none());
+    assert!(matches!(
+        store.login(login("henry", "pw")).await,
+        Err(IdentityError::InvalidCredentials)
+    ));
+    assert!(matches!(
+        store.delete_account("henry").await,
+        Err(IdentityError::UserNotFound)
+    ));
+}
+
+// The schema declares ON DELETE CASCADE, but `PRAGMA foreign_keys` is
+// per-connection and only `setup` sets it — so on a runtime connection the
+// cascade does not fire and the tokens have to go explicitly. `refresh` reads
+// the token's own row without re-checking the user exists, so a stranded token
+// is a deleted account that still mints sessions.
+#[tokio::test]
+async fn delete_account_revokes_refresh_tokens_so_a_deleted_user_cannot_mint_sessions() {
+    let (store, _dir) = start_store().await;
+    store.register(reg("iris", "pw")).await.unwrap();
+    let refresh_token = store
+        .issue_session("iris")
+        .await
+        .unwrap()
+        .refresh_token
+        .unwrap();
+    store.delete_account("iris").await.unwrap();
+    assert!(matches!(
+        store.refresh(RefreshRequest { refresh_token }).await,
+        Err(IdentityError::InvalidRefreshToken)
+    ));
 }

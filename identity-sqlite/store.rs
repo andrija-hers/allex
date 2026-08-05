@@ -562,6 +562,87 @@ impl AccountStore for SqliteIdentityStore {
         }))
     }
 
+    async fn list_accounts(&self) -> Result<Vec<AccountRecord>, IdentityError> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AccountRecord>, IdentityError> {
+            let conn = store.open_conn()?;
+            let mut stmt = conn
+                .prepare("SELECT handle, role FROM users ORDER BY handle")
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(AccountRecord {
+                        handle: row.get(0)?,
+                        role: row.get(1)?,
+                    })
+                })
+                .map_err(db_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn set_role(&self, handle: &str, role: &str) -> Result<(), IdentityError> {
+        let store = self.clone();
+        let handle = handle.to_owned();
+        let role = role.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let mut conn = store.open_conn()?;
+            let tx = conn.transaction().map_err(db_err)?;
+            let affected = tx
+                .execute(
+                    "UPDATE users SET role = ?1 WHERE handle = ?2",
+                    params![role, handle],
+                )
+                .map_err(db_err)?;
+            if affected == 0 {
+                return Err(IdentityError::UserNotFound);
+            }
+            // One transaction with the update: a role change that left the old
+            // refresh tokens behind would be refreshable straight back.
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE handle = ?1",
+                params![handle],
+            )
+            .map_err(db_err)?;
+            tx.commit().map_err(db_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
+    async fn delete_account(&self, handle: &str) -> Result<(), IdentityError> {
+        let store = self.clone();
+        let handle = handle.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), IdentityError> {
+            let mut conn = store.open_conn()?;
+            let tx = conn.transaction().map_err(db_err)?;
+            // Explicitly, before the user row: the schema declares ON DELETE
+            // CASCADE, but `PRAGMA foreign_keys` is per-connection and only
+            // `setup` sets it, so on a normal runtime connection the cascade
+            // does not fire. Relying on it would strand live refresh tokens for
+            // a deleted handle — and `refresh` reads that row without checking
+            // the user still exists.
+            tx.execute(
+                "DELETE FROM refresh_tokens WHERE handle = ?1",
+                params![handle],
+            )
+            .map_err(db_err)?;
+            let affected = tx
+                .execute("DELETE FROM users WHERE handle = ?1", params![handle])
+                .map_err(db_err)?;
+            if affected == 0 {
+                return Err(IdentityError::UserNotFound);
+            }
+            tx.commit().map_err(db_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| IdentityError::Internal(e.to_string()))?
+    }
+
     async fn issue_session(&self, handle: &str) -> Result<TokenResponse, IdentityError> {
         let store = self.clone();
         let handle_owned = handle.to_owned();
