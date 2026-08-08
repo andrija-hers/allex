@@ -17,8 +17,8 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    let usage = "usage: cargo run -p allex-dart-codegen -- --source <rust-file> [--source <rust-file> ...] [--extra-import <dart-path> ...] --out-dir <dart-dir>";
-    let (source_paths, out_dir, extra_imports) = parse_args(args, usage)?;
+    let usage = "usage: cargo run -p allex-dart-codegen -- --source <rust-file> [--source <rust-file> ...] --out-dir <dart-dir>";
+    let (source_paths, out_dir) = parse_args(args, usage)?;
 
     // Parse each source file independently and merge the results. A plain text concatenation of
     // Rust files is not valid Rust — a non-first file's `//!` inner-doc header (or any `#![…]` crate
@@ -58,12 +58,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     const SHARED_DTOS: &str = "dtos.dart";
     let dto_path = out_dir.join(SHARED_DTOS);
-    let extra_import_refs = extra_imports.iter().map(String::as_str).collect::<Vec<_>>();
-    fs::write(
-        &dto_path,
-        render_dart_dtos("shared", &dtos, &extra_import_refs),
-    )
-    .map_err(|err| format!("failed to write {}: {err}", dto_path.display()))?;
+    fs::write(&dto_path, render_dart_dtos("shared", &dtos, &[]))
+        .map_err(|err| format!("failed to write {}: {err}", dto_path.display()))?;
 
     for module in &modules {
         let client_path = out_dir.join(format!("{}_client.dart", module.module_name));
@@ -77,13 +73,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_args(
-    args: Vec<String>,
-    usage: &str,
-) -> Result<(Vec<PathBuf>, PathBuf, Vec<String>), String> {
+fn parse_args(args: Vec<String>, usage: &str) -> Result<(Vec<PathBuf>, PathBuf), String> {
     let mut source_paths: Vec<PathBuf> = Vec::new();
     let mut out_dir: Option<PathBuf> = None;
-    let mut extra_imports: Vec<String> = Vec::new();
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
@@ -99,18 +91,6 @@ fn parse_args(
                     .next()
                     .ok_or_else(|| format!("missing value for --out-dir\n{usage}"))?;
                 out_dir = Some(PathBuf::from(value));
-            }
-            // A DTO can legitimately live in hand-written Dart: a type the app
-            // gives real behaviour to (formatting, derived getters) is not one
-            // the generator should flatten into a data class. `render_dart_dtos`
-            // has always taken these; only the CLI had no way to pass them, so
-            // moving to a shared dtos.dart silently dropped the per-module
-            // imports consumers relied on.
-            "--extra-import" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| format!("missing value for --extra-import\n{usage}"))?;
-                extra_imports.push(value);
             }
             "--help" | "-h" => return Err(usage.to_string()),
             other => return Err(format!("unknown argument `{other}`\n{usage}")),
@@ -131,5 +111,5 @@ fn parse_args(
         }
     }
 
-    Ok((source_paths, out_dir, extra_imports))
+    Ok((source_paths, out_dir))
 }
