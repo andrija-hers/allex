@@ -636,7 +636,26 @@ impl MethodInfo {
                                 let _guard = __allex_span.enter();
                                 let mut response_stream = response_stream;
 
-                                while let Some(frame) = ::futures::StreamExt::next(&mut response_stream).await {
+                                // This runs in a task of its own. When whoever holds the
+                                // future drops it, stop reading: otherwise the task, and
+                                // the connection it reads, live as long as the server keeps
+                                // the stream open, which for a watch is for ever.
+                                loop {
+                                    let frame = {
+                                        let next = ::futures::StreamExt::next(&mut response_stream);
+                                        let closed = sender.closed();
+                                        ::futures::pin_mut!(next, closed);
+                                        match ::futures::future::select(next, closed).await {
+                                            ::futures::future::Either::Left((Some(frame), _)) => frame,
+                                            ::futures::future::Either::Left((None, _)) => break,
+                                            ::futures::future::Either::Right(_) => {
+                                                ::transport::tracing::debug!(parent: &__allex_span, outcome = "abandoned", "rpc streaming client call abandoned by its caller");
+                                                return ::transport::ProgressOutcome::Transport(
+                                                    ::transport::TransportIssue::Interrupted,
+                                                );
+                                            }
+                                        }
+                                    };
                                     match frame {
                                         Err(error) => {
                                             ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc streaming client call failed");

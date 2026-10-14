@@ -57,6 +57,23 @@ impl<P> ProgressSender<P> {
     pub fn progress(&self, value: P) {
         let _ = self.tx.send(value);
     }
+
+    /// Whether the consumer of the progress has gone away (a streaming client
+    /// disconnected, or the [`ProgressableFuture`] was dropped). Progress sent
+    /// after that is discarded.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Completes once the consumer of the progress has gone away.
+    ///
+    /// The operation runs in a task of its own and nothing cancels it when the
+    /// consumer leaves. An operation that would otherwise run until something
+    /// else ends it (a loop over a watched value, say) should select on this
+    /// and return, or it runs for the rest of the process.
+    pub async fn closed(&self) {
+        self.tx.closed().await
+    }
 }
 
 /// A Future that can emit progress updates
@@ -164,5 +181,40 @@ impl<P: Send + 'static, T: Send + 'static, E: Send + 'static, X: Send + 'static>
         } else {
             ProgressOutcome::Transport(TransportIssue::Interrupted)
         }
+    }
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// An operation that waits on `closed()` ends when its consumer is dropped.
+    #[tokio::test]
+    async fn closed_completes_when_the_consumer_is_dropped() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = ended.clone();
+        let pf = ProgressableFuture::<u32, (), ()>::new(move |tx| async move {
+            tx.progress(1);
+            assert!(!tx.is_closed());
+            tx.closed().await;
+            assert!(tx.is_closed());
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !ended.load(Ordering::SeqCst),
+            "must still wait while the consumer exists"
+        );
+        drop(pf);
+        for _ in 0..100 {
+            if ended.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("closed() did not complete after the consumer was dropped");
     }
 }

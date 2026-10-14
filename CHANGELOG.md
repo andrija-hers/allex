@@ -10,7 +10,34 @@ version number.
 
 ## [Unreleased]
 
+### Added
+- **`ProgressSender::is_closed()` and `ProgressSender::closed()`**, so an
+  operation can tell that whoever consumes its progress has gone. See the fix
+  below for why that matters.
+
 ### Fixed
+- **A streaming call outlived its caller, on both sides.** `ProgressableFuture`
+  runs its operation in a task of its own and `ProgressSender::progress`
+  discards the error when nobody is listening, so nothing ever told an operation
+  that its consumer had left.
+  - *Server side:* a streaming method that loops until something ends it (a
+    watch over a `LocalState`, say) kept running after its client disconnected,
+    for the rest of the process. In the datascope engine every closed browser
+    tab left one such watcher cloning and diffing the whole schedule board on
+    each change: five closed streams added about 15 points of one processor and
+    60 MB to an idle engine, and after five days of normal use the idle engine
+    used 151% of one processor; after a restart, 10%. Such an operation should
+    now select on `ProgressSender::closed()` and return. This crate cannot do it
+    for you: the operation is yours.
+  - *Client side:* the generated Rust client read a streaming response in a task
+    of its own and kept reading after its caller dropped the future, which also
+    kept the connection open, so the server never saw the client leave. It now
+    stops reading when the future is dropped.
+
+  Found by profiling an idle engine (`perf`: the time was in
+  `HashMap<String, serde_json::Value>` equality), not by any test; the tests
+  that pinned it are in datascope (`a_board_stream_stops_watching_*`). The one
+  here, `closed_completes_when_the_consumer_is_dropped`, covers the new method.
 - **The registry turned "no caller" into a caller.** `Registry`'s dispatch did
   `caller_role.unwrap_or("anonymous")` for its tracing span and then passed that
   string *on* as `Some("anonymous")`, so an unauthenticated request reached the
