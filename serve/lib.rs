@@ -226,17 +226,27 @@ where
 
     // Unary. Wrap dispatch in an ACCESS_DENIED scope so a method can escalate a
     // per-object authorization failure to a transport-level 403 via `deny_access()`.
+    //
+    // Raced against the caller hanging up. The request runs in a task of its
+    // own, so nothing else drops it when the connection closes: a method whose
+    // caller had gone used to run to the end for nobody, holding the processors
+    // a waiting caller needed. Dropping the method's future here is how it
+    // learns that it may stop. A finished answer wins a tie.
+    let mut item = item;
     let access_denied = Arc::new(AtomicBool::new(false));
-    let response = ACCESS_DENIED
-        .scope(
-            access_denied.clone(),
-            CALLER.scope(ctx, async {
-                registry
-                    .execute(&module, &method, payload, role.as_deref())
-                    .await
-            }),
-        )
-        .await;
+    let dispatch = ACCESS_DENIED.scope(
+        access_denied.clone(),
+        CALLER.scope(ctx, async {
+            registry
+                .execute(&module, &method, payload, role.as_deref())
+                .await
+        }),
+    );
+    let response = tokio::select! {
+        biased;
+        response = dispatch => response,
+        () = item.caller_gone() => return,
+    };
 
     if access_denied.load(Ordering::Relaxed) {
         // A method called `deny_access()`: respond 403, ignoring the domain error

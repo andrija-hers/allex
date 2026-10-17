@@ -106,6 +106,7 @@ dependencies = [
  "allex-execution",
  "allex-serve",
  "allex-transport",
+ "async-trait",
  "axum",
  "dotenvy",
  "tokio",

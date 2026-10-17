@@ -77,6 +77,12 @@ impl ServerSideOneShotTransportItem for AxumOneShotItem {
                 Error::SendRequest("Could not send response, the caller dropped".to_string())
             })
     }
+
+    /// The HTTP handler holding the other end is dropped when its connection
+    /// closes, which closes the reply channel.
+    async fn caller_gone(&mut self) {
+        self.response.closed().await;
+    }
 }
 
 /// Extension trait for transports that can stream Axum responses.

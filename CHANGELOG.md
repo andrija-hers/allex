@@ -11,11 +11,22 @@ version number.
 ## [Unreleased]
 
 ### Added
+- **`ServerSideOneShotTransportItem::caller_gone()`**, completing once nobody
+  waits for a unary request's answer any more. It never completes by default,
+  so a transport that cannot tell behaves as before; the axum transport
+  completes it when the HTTP connection closes. See the fix below.
 - **`ProgressSender::is_closed()` and `ProgressSender::closed()`**, so an
   operation can tell that whoever consumes its progress has gone. See the fix
   below for why that matters.
 
 ### Fixed
+- **A unary call outlived its caller.** `serve_dispatch` runs every request in
+  a task of its own, so closing the connection dropped only the HTTP side and
+  the method ran to its end for nobody. In the datascope engine a statistics
+  screen left after 10 seconds kept computing for 17 minutes and slowed every
+  other request meanwhile. The unary dispatch now races the method against
+  `caller_gone()` (a finished answer wins a tie) and drops the method's future
+  when the caller has gone, which is how a method learns it may stop.
 - **A streaming call outlived its caller, on both sides.** `ProgressableFuture`
   runs its operation in a task of its own and `ProgressSender::progress`
   discards the error when nobody is listening, so nothing ever told an operation

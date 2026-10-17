@@ -99,6 +99,16 @@ pub trait ServerSideOneShotTransportItem {
 
     /// Completes the request with the provided encoded response payload.
     fn respond_with(self, payload: Payload) -> impl Future<Output = Result<()>> + Send;
+
+    /// Completes once nobody waits for this request's answer any more: the
+    /// caller hung up. The server then stops working on it instead of
+    /// computing an answer nobody will read.
+    ///
+    /// Never completes by default, so a transport that cannot tell keeps
+    /// running every request to its end, as before.
+    fn caller_gone(&mut self) -> impl Future<Output = ()> + Send {
+        std::future::pending()
+    }
 }
 
 /// Server-side source of unary transport items.

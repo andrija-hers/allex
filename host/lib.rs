@@ -300,3 +300,97 @@ mod compression_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod hang_up_tests {
+    use super::ServiceHost;
+    use async_trait::async_trait;
+    use execution::MethodExecutor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use transport::{JsonCodec, Payload, Result};
+
+    struct SetOnDrop(Arc<AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A method that takes far longer than anyone waits, and says when it
+    /// started and when its future was dropped.
+    struct Slow {
+        started: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl MethodExecutor for Slow {
+        fn get_name(&self) -> &str {
+            "slow"
+        }
+
+        async fn execute(
+            &self,
+            _method: &str,
+            _payload: Payload,
+            _caller_role: Option<&str>,
+        ) -> Result<Payload> {
+            let _dropped = SetOnDrop(self.dropped.clone());
+            self.started.store(true, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            unreachable!("the caller hung up long before this")
+        }
+    }
+
+    async fn until(flag: &AtomicBool) -> bool {
+        for _ in 0..300 {
+            if flag.load(Ordering::SeqCst) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// The request runs in a task of its own, so closing the connection did
+    /// not stop it: a caller that had left still had its method computed to
+    /// the end, holding the processors the next caller needed.
+    #[tokio::test]
+    async fn a_unary_call_stops_when_its_caller_hangs_up() {
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let host = ServiceHost::<JsonCodec>::new().register_module(Arc::new(Slow {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(host.into_router().serve(listener));
+
+        // The call, as a JSON string: the transport's encoding of a payload.
+        let body = r#""[\"slow\",[\"wait\",\"{}\"]]""#;
+        let mut socket = TcpStream::connect(address).await.expect("connect");
+        socket
+            .write_all(
+                format!(
+                    "POST /rpc HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send");
+        assert!(until(&started).await, "the method never started");
+
+        drop(socket);
+        let stopped = until(&dropped).await;
+        server.abort();
+        assert!(stopped, "the method ran on after its caller hung up");
+    }
+}

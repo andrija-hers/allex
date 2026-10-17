@@ -18,4 +18,4 @@ path = "./lib.rs"
 execution = { version = "0.1.0", path = "../execution", package = "allex-execution" }
 transport = { version = "0.1.0", path = "../transport", package = "allex-transport" }
 futures = "0.3"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "macros"] }
