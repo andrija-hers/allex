@@ -26,14 +26,26 @@
 //!   *current* role and profile — rights changes propagate at the refresh
 //!   boundary instead of being frozen for the refresh token's lifetime.
 //!
-//! Session state (opaque refresh tokens, revoked access tokens) is kept
-//! **in-memory** in this version — correct for a single-instance service. A
-//! durable / multi-instance `SessionStore` seam can be added later without
-//! changing the [`CredentialBackend`] contract.
+//! Session state (opaque refresh tokens, revoked access tokens) lives behind the
+//! [`SessionStore`] seam. The default, [`MemorySessionStore`], keeps it in memory
+//! — correct for a single-instance service whose sessions may end with the
+//! process. A host whose users must stay signed in across a restart or an
+//! upgrade plugs in a durable store via [`CredentialStore::new_with_options`].
+//! A store is only ever handed the SHA-256 of a token (see [`session_key`]), so
+//! whatever it persists cannot be replayed as a credential.
+//!
+//! An optional **absolute session cap** ([`SessionOptions::max_session_secs`])
+//! bounds how long one sign-in can be kept alive by refreshing: every refresh
+//! entry carries the time of the original login, unchanged through rotation.
 
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use transport::BearerTokenValidator;
 
 use crate::{IdentityError, TokenResponse, tokens};
@@ -86,14 +98,134 @@ pub trait CredentialBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<AuthenticatedUser>, IdentityError>> + Send;
 }
 
+/// One live refresh token, as a [`SessionStore`] keeps it (under the token's
+/// [`session_key`], never the token itself).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshSession {
+    /// The user the token was issued to (re-resolved on refresh).
+    pub handle: String,
+    /// Unix seconds from which the token is refused (sliding: a refresh issues a
+    /// new token with a fresh expiry).
+    pub expires_at: u64,
+    /// Unix seconds of the original login (credentials or SSO) — carried
+    /// unchanged through every rotation, so an absolute cap can be enforced.
+    pub login_at: u64,
+}
+
+/// Where [`CredentialStore`] keeps session state: live refresh tokens and
+/// revoked access tokens, each under an opaque key (the hex SHA-256 of the
+/// token, see [`session_key`]).
+///
+/// Methods are synchronous and infallible: a store backs every login, refresh,
+/// logout and authenticated request, and a durable store that cannot persist
+/// should degrade (log, keep serving from memory) rather than fail sign-in.
+/// Each method must be atomic with respect to the others — in particular
+/// [`take_refresh`](SessionStore::take_refresh) must hand a given key out at
+/// most once, which is what keeps a refresh token single-use when two refreshes
+/// of the same token race.
+pub trait SessionStore: Send + Sync + 'static {
+    /// Drops every refresh session expired at `now` (`expires_at <= now`), then
+    /// stores `session` under `key`.
+    fn put_refresh(&self, key: &str, session: RefreshSession, now: u64);
+
+    /// Removes and returns the refresh session under `key`, expired or not (the
+    /// caller checks).
+    fn take_refresh(&self, key: &str) -> Option<RefreshSession>;
+
+    /// Removes the refresh session under `key`, if any.
+    fn remove_refresh(&self, key: &str);
+
+    /// Drops every revocation expired at `now`, then records `key` as revoked
+    /// until `expires_at` (the access token's own expiry).
+    fn revoke_access(&self, key: &str, expires_at: u64, now: u64);
+
+    /// Whether `key` is revoked and the revocation has not expired at `now`.
+    fn is_revoked(&self, key: &str, now: u64) -> bool;
+}
+
+/// The default [`SessionStore`]: two in-memory maps, lost when the process ends.
+#[derive(Debug, Default)]
+pub struct MemorySessionStore {
+    refresh: Mutex<HashMap<String, RefreshSession>>,
+    revoked: Mutex<HashMap<String, u64>>,
+}
+
+impl MemorySessionStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl SessionStore for MemorySessionStore {
+    fn put_refresh(&self, key: &str, session: RefreshSession, now: u64) {
+        let mut map = lock(&self.refresh);
+        map.retain(|_, s| s.expires_at > now);
+        map.insert(key.to_owned(), session);
+    }
+
+    fn take_refresh(&self, key: &str) -> Option<RefreshSession> {
+        lock(&self.refresh).remove(key)
+    }
+
+    fn remove_refresh(&self, key: &str) {
+        lock(&self.refresh).remove(key);
+    }
+
+    fn revoke_access(&self, key: &str, expires_at: u64, now: u64) {
+        let mut map = lock(&self.revoked);
+        map.retain(|_, e| *e > now);
+        map.insert(key.to_owned(), expires_at);
+    }
+
+    fn is_revoked(&self, key: &str, now: u64) -> bool {
+        lock(&self.revoked).get(key).is_some_and(|e| *e > now)
+    }
+}
+
+/// A poisoned lock still guards a consistent map (every critical section is a
+/// single map operation), so recover the guard rather than fail sign-in.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The key a [`SessionStore`] sees for a token: the lowercase hex SHA-256 of the
+/// token string. One-way, so a store's contents (a file, a table) cannot be
+/// replayed as a refresh or access token.
+pub fn session_key(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+/// Session settings for [`CredentialStore::new_with_options`].
+#[derive(Clone)]
+pub struct SessionOptions {
+    /// Refresh-token lifetime from issue (sliding: each refresh re-issues).
+    pub refresh_ttl_secs: u64,
+    /// Absolute cap on one sign-in: a refresh is refused once more than this many
+    /// seconds have passed since the original login, however recently the token
+    /// was rotated. `None` = no cap.
+    pub max_session_secs: Option<u64>,
+    /// Where refresh tokens and revocations are kept.
+    pub store: Arc<dyn SessionStore>,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            refresh_ttl_secs: tokens::REFRESH_TOKEN_TTL_SECS,
+            max_session_secs: None,
+            store: Arc::new(MemorySessionStore::new()),
+        }
+    }
+}
+
 struct CredentialStoreInner<B: CredentialBackend> {
     backend: B,
     secret: String,
     refresh_ttl_secs: u64,
-    /// opaque refresh token -> (handle, expiry_unix_secs)
-    refresh_tokens: Mutex<HashMap<String, (String, u64)>>,
-    /// revoked access token -> expiry_unix_secs (kept only until natural expiry)
-    revoked_access: Mutex<HashMap<String, u64>>,
+    max_session_secs: Option<u64>,
+    /// Refresh sessions + revoked access tokens, keyed by [`session_key`].
+    sessions: Arc<dyn SessionStore>,
 }
 
 /// Generic identity engine over a [`CredentialBackend`]. Cheaply cloneable
@@ -125,13 +257,30 @@ impl<B: CredentialBackend> CredentialStore<B> {
         secret: impl Into<String>,
         refresh_ttl_secs: u64,
     ) -> Self {
+        Self::new_with_options(
+            backend,
+            secret,
+            SessionOptions {
+                refresh_ttl_secs,
+                ..SessionOptions::default()
+            },
+        )
+    }
+
+    /// Like [`new`](CredentialStore::new) with explicit [`SessionOptions`]: a
+    /// custom (e.g. durable) [`SessionStore`] and/or an absolute session cap.
+    pub fn new_with_options(
+        backend: B,
+        secret: impl Into<String>,
+        options: SessionOptions,
+    ) -> Self {
         Self {
             inner: Arc::new(CredentialStoreInner {
                 backend,
                 secret: secret.into(),
-                refresh_ttl_secs,
-                refresh_tokens: Mutex::new(HashMap::new()),
-                revoked_access: Mutex::new(HashMap::new()),
+                refresh_ttl_secs: options.refresh_ttl_secs,
+                max_session_secs: options.max_session_secs,
+                sessions: options.store,
             }),
         }
     }
@@ -149,27 +298,36 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .verify_credentials(credentials)
             .await?
             .ok_or(IdentityError::InvalidCredentials)?;
-        self.issue_for(&user).await
+        self.issue_for(&user, now_secs()).await
     }
 
     /// Exchanges a valid refresh token for a new token pair, **re-resolving** the
     /// user's current role/profile so rights changes take effect (rotates the
-    /// refresh token).
+    /// refresh token). The token is consumed first and checked second, so it is
+    /// single-use even when two refreshes race or it turns out expired. Past the
+    /// absolute cap ([`SessionOptions::max_session_secs`]) the refresh is refused
+    /// exactly like an expired token.
     pub async fn refresh(&self, refresh_token: &str) -> Result<TokenResponse, IdentityError> {
-        let handle = {
-            let mut map = self.inner.refresh_tokens.lock().await;
-            match map.remove(refresh_token) {
-                Some((handle, expiry)) if expiry > now_secs() => handle,
-                _ => return Err(IdentityError::InvalidRefreshToken),
-            }
-        };
+        let session = self
+            .inner
+            .sessions
+            .take_refresh(&session_key(refresh_token))
+            .ok_or(IdentityError::InvalidRefreshToken)?;
+        let now = now_secs();
+        let capped = self
+            .inner
+            .max_session_secs
+            .is_some_and(|cap| now.saturating_sub(session.login_at) > cap);
+        if session.expires_at <= now || capped {
+            return Err(IdentityError::InvalidRefreshToken);
+        }
         let user = self
             .inner
             .backend
-            .resolve_user(&handle)
+            .resolve_user(&session.handle)
             .await?
             .ok_or(IdentityError::InvalidRefreshToken)?;
-        self.issue_for(&user).await
+        self.issue_for(&user, session.login_at).await
     }
 
     /// Revokes an access token (until its natural expiry) and/or drops a refresh
@@ -179,12 +337,12 @@ impl<B: CredentialBackend> CredentialStore<B> {
             let exp = tokens::validate_access_token(&self.inner.secret, at)
                 .map(|v| v.expires_at_unix)
                 .unwrap_or_else(|_| now_secs());
-            let mut revoked = self.inner.revoked_access.lock().await;
-            revoked.retain(|_, e| *e > now_secs());
-            revoked.insert(at.to_owned(), exp);
+            self.inner
+                .sessions
+                .revoke_access(&session_key(at), exp, now_secs());
         }
         if let Some(rt) = refresh_token {
-            self.inner.refresh_tokens.lock().await.remove(rt);
+            self.inner.sessions.remove_refresh(&session_key(rt));
         }
     }
 
@@ -197,10 +355,18 @@ impl<B: CredentialBackend> CredentialStore<B> {
     /// whether the token existed — a host exposing this publicly must not leak
     /// which tokens are live.
     pub async fn revoke_refresh_token(&self, refresh_token: &str) {
-        self.inner.refresh_tokens.lock().await.remove(refresh_token);
+        self.inner
+            .sessions
+            .remove_refresh(&session_key(refresh_token));
     }
 
-    async fn issue_for(&self, user: &AuthenticatedUser) -> Result<TokenResponse, IdentityError> {
+    /// Issues a token pair for `user`; `login_at` is the original login's time
+    /// (now for a login, the consumed entry's for a refresh).
+    async fn issue_for(
+        &self,
+        user: &AuthenticatedUser,
+        login_at: u64,
+    ) -> Result<TokenResponse, IdentityError> {
         let token = tokens::issue_access_token_with_profile(
             &self.inner.secret,
             &user.handle,
@@ -208,12 +374,16 @@ impl<B: CredentialBackend> CredentialStore<B> {
             user.profile.as_deref(),
         )?;
         let refresh = uuid::Uuid::new_v4().to_string();
-        let expiry = now_secs() + self.inner.refresh_ttl_secs;
-        {
-            let mut map = self.inner.refresh_tokens.lock().await;
-            map.retain(|_, (_, e)| *e > now_secs());
-            map.insert(refresh.clone(), (user.handle.clone(), expiry));
-        }
+        let now = now_secs();
+        self.inner.sessions.put_refresh(
+            &session_key(&refresh),
+            RefreshSession {
+                handle: user.handle.clone(),
+                expires_at: now + self.inner.refresh_ttl_secs,
+                login_at,
+            },
+            now,
+        );
         Ok(TokenResponse {
             token,
             refresh_token: Some(refresh),
@@ -225,16 +395,13 @@ impl<B: CredentialBackend> CredentialStore<B> {
 
 impl<B: CredentialBackend> BearerTokenValidator for CredentialStore<B> {
     fn validate_bearer(&self, token: &str) -> Option<String> {
-        // Non-blocking revocation check on the request path (mirrors the stock
-        // stores). A missed lock momentarily treats the token as live; the JWT
-        // signature + expiry are still enforced below.
-        let revoked = self
+        // The revocation check first (a short std-mutex section, never across an
+        // await); the JWT signature + expiry are enforced below.
+        if self
             .inner
-            .revoked_access
-            .try_lock()
-            .map(|set| set.get(token).is_some_and(|exp| *exp > now_secs()))
-            .unwrap_or(false);
-        if revoked {
+            .sessions
+            .is_revoked(&session_key(token), now_secs())
+        {
             return None;
         }
         let v = tokens::validate_access_token(&self.inner.secret, token).ok()?;
@@ -261,6 +428,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use std::collections::HashMap as Map;
+    use tokio::sync::Mutex;
 
     /// A minimal backend whose user table can be mutated between calls, so a test
     /// can prove that refresh re-resolves the *current* role/profile.
@@ -428,5 +596,216 @@ mod tests {
         s.logout(Some(&resp.token), resp.refresh_token.as_deref())
             .await;
         assert!(s.validate_bearer(&resp.token).is_none());
+    }
+
+    // ---- the SessionStore seam + the absolute cap ----
+
+    fn alice() -> Creds {
+        Creds {
+            handle: "alice".into(),
+            password: "pw".into(),
+        }
+    }
+
+    async fn alice_backend() -> TestBackend {
+        let backend = TestBackend::default();
+        backend.set("alice", "pw", "user", None).await;
+        backend
+    }
+
+    /// A store over a shared [`MemorySessionStore`] the test can inspect.
+    fn store_with(
+        backend: TestBackend,
+        mem: &Arc<MemorySessionStore>,
+        refresh_ttl_secs: u64,
+        max_session_secs: Option<u64>,
+    ) -> CredentialStore<TestBackend> {
+        CredentialStore::new_with_options(
+            backend,
+            "test-secret",
+            SessionOptions {
+                refresh_ttl_secs,
+                max_session_secs,
+                store: mem.clone(),
+            },
+        )
+    }
+
+    /// Moves every live session's original login `secs` into the past.
+    fn backdate_login(mem: &MemorySessionStore, secs: u64) {
+        for s in lock(&mem.refresh).values_mut() {
+            s.login_at -= secs;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_token_yield_one_winner() {
+        let s = store(alice_backend().await);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        let (a, b) = tokio::join!(s.refresh(&rt), s.refresh(&rt));
+        assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "exactly one may win");
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_token_is_refused_and_consumed() {
+        let mem = Arc::new(MemorySessionStore::new());
+        // TTL 0: the token's expiry is its issue second, i.e. already expired.
+        let s = store_with(alice_backend().await, &mem, 0, None);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        assert!(matches!(
+            s.refresh(&rt).await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        assert!(lock(&mem.refresh).is_empty(), "take-then-check consumes it");
+    }
+
+    #[tokio::test]
+    async fn login_sweeps_expired_refresh_sessions() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 0, None);
+        for _ in 0..3 {
+            s.login(alice()).await.unwrap();
+        }
+        // Each login swept the previous (expired) entry before adding its own.
+        assert_eq!(lock(&mem.refresh).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_drops_the_refresh_token_and_sweeps() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 3600, None);
+        mem.revoke_access("stale", 1, 1);
+        let resp = s.login(alice()).await.unwrap();
+        let rt = resp.refresh_token.unwrap();
+        s.logout(Some(&resp.token), Some(&rt)).await;
+        assert!(s.validate_bearer(&resp.token).is_none());
+        assert!(s.refresh(&rt).await.is_err());
+        let revoked = lock(&mem.revoked);
+        assert!(!revoked.contains_key("stale"), "expired revocation swept");
+        assert_eq!(revoked.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_refresh_token_alone_drops_it() {
+        let s = store(alice_backend().await);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        s.revoke_refresh_token(&rt).await;
+        assert!(s.refresh(&rt).await.is_err());
+    }
+
+    /// Records every key a store is handed.
+    #[derive(Default)]
+    struct RecordingStore {
+        inner: MemorySessionStore,
+        keys: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingStore {
+        fn saw(&self, key: &str) {
+            lock(&self.keys).push(key.to_owned());
+        }
+    }
+
+    impl SessionStore for RecordingStore {
+        fn put_refresh(&self, key: &str, session: RefreshSession, now: u64) {
+            self.saw(key);
+            self.inner.put_refresh(key, session, now)
+        }
+        fn take_refresh(&self, key: &str) -> Option<RefreshSession> {
+            self.saw(key);
+            self.inner.take_refresh(key)
+        }
+        fn remove_refresh(&self, key: &str) {
+            self.saw(key);
+            self.inner.remove_refresh(key)
+        }
+        fn revoke_access(&self, key: &str, expires_at: u64, now: u64) {
+            self.saw(key);
+            self.inner.revoke_access(key, expires_at, now)
+        }
+        fn is_revoked(&self, key: &str, now: u64) -> bool {
+            self.saw(key);
+            self.inner.is_revoked(key, now)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_store_never_sees_a_raw_token() {
+        let rec = Arc::new(RecordingStore::default());
+        let s = CredentialStore::new_with_options(
+            alice_backend().await,
+            "test-secret",
+            SessionOptions {
+                store: rec.clone(),
+                ..SessionOptions::default()
+            },
+        );
+        let first = s.login(alice()).await.unwrap();
+        let second = s
+            .refresh(first.refresh_token.as_deref().unwrap())
+            .await
+            .unwrap();
+        s.validate_bearer(&second.token).unwrap();
+        s.logout(Some(&second.token), second.refresh_token.as_deref())
+            .await;
+        let raw = [
+            first.token,
+            first.refresh_token.unwrap(),
+            second.token,
+            second.refresh_token.unwrap(),
+        ];
+        let keys = lock(&rec.keys);
+        assert!(keys.len() >= 5);
+        for k in keys.iter() {
+            assert_eq!(k.len(), 64, "{k}");
+            assert!(k.bytes().all(|b| b.is_ascii_hexdigit()), "{k}");
+            assert!(
+                raw.iter()
+                    .all(|t| !t.contains(k.as_str()) && !k.contains(t.as_str()))
+            );
+        }
+        assert!(keys.contains(&session_key(&raw[1])));
+    }
+
+    #[tokio::test]
+    async fn rotation_keeps_the_original_login_time() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 3600, Some(7200));
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 600);
+        let login_at = lock(&mem.refresh).values().next().unwrap().login_at;
+        let rt2 = s.refresh(&rt).await.unwrap().refresh_token.unwrap();
+        s.refresh(&rt2).await.unwrap();
+        let map = lock(&mem.refresh);
+        assert_eq!(map.len(), 1);
+        let entry = map.values().next().unwrap();
+        assert_eq!(entry.login_at, login_at, "carried through two rotations");
+        assert!(entry.expires_at >= now_secs() + 3599, "expiry still slides");
+    }
+
+    #[tokio::test]
+    async fn refresh_past_the_session_cap_is_refused() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 30 * 86_400, Some(3600));
+        // Within the cap: fine.
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 3000);
+        let rt = s.refresh(&rt).await.unwrap().refresh_token.unwrap();
+        // Past it (the token itself is fresh — only login_at is old): refused, and consumed.
+        backdate_login(&mem, 700);
+        assert!(matches!(
+            s.refresh(&rt).await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        assert!(lock(&mem.refresh).is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_cap_by_default() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 3600, None);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 10 * 365 * 86_400);
+        assert!(s.refresh(&rt).await.is_ok());
     }
 }

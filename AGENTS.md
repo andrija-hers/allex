@@ -401,12 +401,16 @@ Learned while building this; ignore at your peril.
   authenticate; possession of the token is the proof, exactly as for a
   password-reset link, and it answers identically for unknown, expired and live
   tokens so it cannot be used to probe which ones work.
-- **Session state is in-memory ⇒ effectively single-instance.** Refresh tokens
-  and the revocation set live in the `CredentialStore` instance. Access-token
-  *validation* is stateless (any instance with the same secret accepts a token),
-  but **refresh rotation and logout-revocation do not cross instances** — a token
-  revoked on host A still validates on host B until it expires. Run one instance,
-  or wait for the durable `SessionStore` seam (not yet built). The same is true of
+- **Session state is in-memory by default ⇒ effectively single-instance.**
+  Refresh tokens and the revocation set live in the `CredentialStore`'s
+  `SessionStore` (default `MemorySessionStore`). Access-token *validation* is
+  stateless (any instance with the same secret accepts a token), but **refresh
+  rotation and logout-revocation do not cross instances** — a token revoked on
+  host A still validates on host B until it expires. Run one instance, or plug a
+  shared/durable `SessionStore` in via `CredentialStore::new_with_options` (it is
+  handed only `session_key(token)` = hex SHA-256, never a usable token; the same
+  `SessionOptions` carry an optional absolute cap, `max_session_secs`, measured
+  from the original login and kept through rotation). The same is true of
   every stock store's revoked-access-token set: it is a process-local `HashSet`,
   cleared on restart. A host that runs two nodes has to solve this above allex —
   see the `revocation.rs` / `SanctionGate` pattern in the stasera backend, which

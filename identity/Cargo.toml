@@ -22,6 +22,8 @@ async-trait = "0.1"
 jsonwebtoken = "9"
 bcrypt = "0.15"
 uuid = { version = "1", features = ["v4"] }
+# credential_store::session_key: a SessionStore sees SHA-256(token), never a usable token.
+sha2 = "0.10"
 message_templates = { path = "../message-templates", package = "allex-message-templates", version = "0.1.0" }
 transport = { path = "../transport", package = "allex-transport", version = "0.1.0" }
 rpc-macro = { path = "../rpc-macro", package = "allex-rpc-macros", version = "0.1.0" }
