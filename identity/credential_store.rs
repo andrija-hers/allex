@@ -132,6 +132,25 @@ pub trait SessionStore: Send + Sync + 'static {
     /// caller checks).
     fn take_refresh(&self, key: &str) -> Option<RefreshSession>;
 
+    /// Removes and returns the refresh session under `key` only when it belongs
+    /// to `handle` (expired or not: the caller checks). A session of another
+    /// user is left in place and `None` returned, so a refresh token presented
+    /// by the wrong caller is refused without being consumed.
+    ///
+    /// The default takes and, on a mismatch, puts the session back: correct,
+    /// but with a window in which a concurrent refresh by the rightful owner
+    /// misses it. A store that can test-and-remove under one lock should
+    /// override it (the in-memory store does).
+    fn take_refresh_for(&self, key: &str, handle: &str) -> Option<RefreshSession> {
+        let session = self.take_refresh(key)?;
+        if session.handle == handle {
+            return Some(session);
+        }
+        // `now = 0`: the put-back sweeps nothing.
+        self.put_refresh(key, session, 0);
+        None
+    }
+
     /// Removes the refresh session under `key`, if any.
     fn remove_refresh(&self, key: &str);
 
@@ -166,6 +185,14 @@ impl SessionStore for MemorySessionStore {
 
     fn take_refresh(&self, key: &str) -> Option<RefreshSession> {
         lock(&self.refresh).remove(key)
+    }
+
+    fn take_refresh_for(&self, key: &str, handle: &str) -> Option<RefreshSession> {
+        let mut map = lock(&self.refresh);
+        if map.get(key)?.handle != handle {
+            return None;
+        }
+        map.remove(key)
     }
 
     fn remove_refresh(&self, key: &str) {
@@ -226,6 +253,17 @@ struct CredentialStoreInner<B: CredentialBackend> {
     max_session_secs: Option<u64>,
     /// Refresh sessions + revoked access tokens, keyed by [`session_key`].
     sessions: Arc<dyn SessionStore>,
+}
+
+/// The two token pairs [`CredentialStore::fork`] issues: one for the window
+/// that asked (its old refresh token is spent), one for the window it hands a
+/// session to. The two refresh chains are independent from here on.
+#[derive(Debug, Clone)]
+pub struct ForkedTokens {
+    /// The forking caller's new pair.
+    pub opener: TokenResponse,
+    /// The new window's pair.
+    pub child: TokenResponse,
 }
 
 /// Generic identity engine over a [`CredentialBackend`]. Cheaply cloneable
@@ -328,6 +366,50 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .await?
             .ok_or(IdentityError::InvalidRefreshToken)?;
         self.issue_for(&user, session.login_at).await
+    }
+
+    /// Splits one sign-in into two independent sessions: consumes `refresh_token`
+    /// and issues **two** token pairs, each with its own refresh chain, both
+    /// carrying the original login time (so the absolute cap,
+    /// [`SessionOptions::max_session_secs`], still counts from the one sign-in).
+    /// Used to hand a second window a session of its own instead of sharing,
+    /// and racing over, one single-use refresh chain.
+    ///
+    /// `expected_handle` is the user the caller has already authenticated as
+    /// (e.g. the bearer's handle): a token issued to anyone else is refused
+    /// **without** being consumed, so a stolen refresh token can be neither
+    /// forked nor burnt by another user. Otherwise the checks are exactly
+    /// [`refresh`](CredentialStore::refresh)'s (consumed first, then expiry and
+    /// cap, then the user re-resolved) and every refusal is the same plain
+    /// [`IdentityError::InvalidRefreshToken`].
+    pub async fn fork(
+        &self,
+        refresh_token: &str,
+        expected_handle: &str,
+    ) -> Result<ForkedTokens, IdentityError> {
+        let session = self
+            .inner
+            .sessions
+            .take_refresh_for(&session_key(refresh_token), expected_handle)
+            .ok_or(IdentityError::InvalidRefreshToken)?;
+        let now = now_secs();
+        let capped = self
+            .inner
+            .max_session_secs
+            .is_some_and(|cap| now.saturating_sub(session.login_at) > cap);
+        if session.expires_at <= now || capped {
+            return Err(IdentityError::InvalidRefreshToken);
+        }
+        let user = self
+            .inner
+            .backend
+            .resolve_user(&session.handle)
+            .await?
+            .ok_or(IdentityError::InvalidRefreshToken)?;
+        Ok(ForkedTokens {
+            opener: self.issue_for(&user, session.login_at).await?,
+            child: self.issue_for(&user, session.login_at).await?,
+        })
     }
 
     /// Revokes an access token (until its natural expiry) and/or drops a refresh
@@ -798,6 +880,149 @@ mod tests {
             IdentityError::InvalidRefreshToken
         ));
         assert!(lock(&mem.refresh).is_empty());
+    }
+
+    // ---- fork ----
+
+    #[tokio::test]
+    async fn fork_spends_the_token_and_yields_two_independent_chains() {
+        let s = store(alice_backend().await);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        let f = s.fork(&rt, "alice").await.unwrap();
+        // The forked token is dead, for refresh and for fork.
+        assert!(matches!(
+            s.refresh(&rt).await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        assert!(s.fork(&rt, "alice").await.is_err());
+        let o = f.opener.refresh_token.clone().unwrap();
+        let c = f.child.refresh_token.clone().unwrap();
+        assert_ne!(o, c);
+        assert_ne!(f.opener.token, f.child.token);
+        assert_eq!(f.child.handle, "alice");
+        assert!(s.validate_bearer(&f.opener.token).is_some());
+        assert!(s.validate_bearer(&f.child.token).is_some());
+        // Rotating one chain leaves the other alive, twice over.
+        let o2 = s.refresh(&o).await.unwrap().refresh_token.unwrap();
+        let o3 = s.refresh(&o2).await.unwrap().refresh_token.unwrap();
+        let c2 = s.refresh(&c).await.unwrap().refresh_token.unwrap();
+        assert!(s.refresh(&o3).await.is_ok());
+        assert!(s.refresh(&c2).await.is_ok());
+        // Logging one out leaves the other alive.
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        let f2 = s.fork(&rt, "alice").await.unwrap();
+        s.logout(Some(&f2.opener.token), f2.opener.refresh_token.as_deref())
+            .await;
+        assert!(s.validate_bearer(&f2.child.token).is_some());
+        let child_rt = f2.child.refresh_token.as_deref().unwrap();
+        assert!(s.refresh(child_rt).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fork_keeps_the_original_login_time_on_both() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 3600, Some(7200));
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 600);
+        let login_at = lock(&mem.refresh).values().next().unwrap().login_at;
+        let f = s.fork(&rt, "alice").await.unwrap();
+        let c2 = s
+            .refresh(f.child.refresh_token.as_deref().unwrap())
+            .await
+            .unwrap();
+        let map = lock(&mem.refresh);
+        assert_eq!(map.len(), 2);
+        for k in [
+            session_key(f.opener.refresh_token.as_deref().unwrap()),
+            session_key(c2.refresh_token.as_deref().unwrap()),
+        ] {
+            assert_eq!(map[&k].login_at, login_at, "both chains keep the sign-in");
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_honours_the_cap_on_both_chains_and_on_itself() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 30 * 86_400, Some(3600));
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 3000);
+        let f = s.fork(&rt, "alice").await.unwrap();
+        // The child chain hits the same cap as the opener's.
+        backdate_login(&mem, 700);
+        for t in [&f.opener, &f.child] {
+            let rt = t.refresh_token.as_deref().unwrap();
+            assert!(matches!(
+                s.refresh(rt).await.unwrap_err(),
+                IdentityError::InvalidRefreshToken
+            ));
+        }
+        // A fork past the cap is refused (and consumed, as refresh does).
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        backdate_login(&mem, 3601);
+        assert!(matches!(
+            s.fork(&rt, "alice").await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        assert!(lock(&mem.refresh).is_empty());
+    }
+
+    #[tokio::test]
+    async fn fork_by_another_user_is_refused_and_leaves_the_token_alive() {
+        let backend = alice_backend().await;
+        backend.set("bob", "pw", "user", None).await;
+        let s = store(backend);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        assert!(matches!(
+            s.fork(&rt, "bob").await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        // Not consumed: alice can still refresh it.
+        assert!(s.refresh(&rt).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_default_take_refresh_for_puts_a_mismatch_back() {
+        // RecordingStore does not override take_refresh_for.
+        let rec = Arc::new(RecordingStore::default());
+        let s = CredentialStore::new_with_options(
+            alice_backend().await,
+            "test-secret",
+            SessionOptions {
+                store: rec.clone(),
+                ..SessionOptions::default()
+            },
+        );
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        assert!(s.fork(&rt, "bob").await.is_err());
+        assert!(s.fork(&rt, "alice").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fork_of_an_unknown_or_expired_token_is_a_plain_reject() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 0, None);
+        assert!(matches!(
+            s.fork("no-such-token", "alice").await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        assert!(matches!(
+            s.fork(&rt, "alice").await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+        // A plain refresh reject is unchanged.
+        assert!(matches!(
+            s.refresh("no-such-token").await.unwrap_err(),
+            IdentityError::InvalidRefreshToken
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_forks_of_one_token_yield_one_winner() {
+        let s = store(alice_backend().await);
+        let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
+        let (a, b) = tokio::join!(s.fork(&rt, "alice"), s.refresh(&rt));
+        assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1, "exactly one may win");
     }
 
     #[tokio::test]
