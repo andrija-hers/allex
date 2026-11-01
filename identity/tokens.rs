@@ -27,6 +27,11 @@ struct Claims {
     /// so older tokens keep decoding unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
+    /// The id of the sign-in session an access token belongs to (one per login, kept through every
+    /// refresh, a new one per fork). Lets a store refuse every access token of a session the moment
+    /// it ends. Absent from tokens issued without one, so older tokens keep decoding unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +44,9 @@ pub struct ValidatedToken {
     /// [`issue_access_token_with_profile`]). Kept as an opaque `String` — decode
     /// it into your own type at the project boundary.
     pub profile: Option<String>,
+    /// The sign-in session the token belongs to, if it was issued with one (see
+    /// [`issue_access_token_for_session`]).
+    pub session_id: Option<String>,
 }
 
 pub fn issue_token_response(
@@ -82,6 +90,7 @@ pub fn issue_access_token(secret: &str, handle: &str, role: &str) -> Result<Stri
         ACCESS_TOKEN_TTL_SECS,
         None,
         None,
+        None,
     )
 }
 
@@ -107,6 +116,29 @@ pub fn issue_access_token_with_profile(
         ACCESS_TOKEN_TTL_SECS,
         None,
         profile,
+        None,
+    )
+}
+
+/// Like [`issue_access_token_with_profile`], and the token names the sign-in session `sid` it
+/// belongs to (re-emitted as [`ValidatedToken::session_id`]), so a store can refuse it as soon as
+/// that session ends.
+pub fn issue_access_token_for_session(
+    secret: &str,
+    handle: &str,
+    role: &str,
+    profile: Option<&str>,
+    sid: &str,
+) -> Result<String, IdentityError> {
+    issue_token(
+        secret,
+        handle,
+        role,
+        TokenKind::Access,
+        ACCESS_TOKEN_TTL_SECS,
+        None,
+        profile,
+        Some(sid),
     )
 }
 
@@ -139,6 +171,7 @@ pub fn issue_refresh_token(
         REFRESH_TOKEN_TTL_SECS,
         None,
         None,
+        None,
     )
 }
 
@@ -156,6 +189,7 @@ pub fn issue_refresh_token_with_session(
         REFRESH_TOKEN_TTL_SECS,
         Some(refresh_session_id),
         None,
+        None,
     )
 }
 
@@ -167,6 +201,24 @@ pub fn validate_refresh_token(secret: &str, token: &str) -> Result<ValidatedToke
     decode_token(secret, token, TokenKind::Refresh)
 }
 
+/// The session id of a genuine access token (signature and kind checked), **expired or not**: a
+/// logout presenting a just-expired access token still names the session to end. `None` for a
+/// forged token, a refresh token, or a token issued without a session id.
+pub fn access_token_session_id(secret: &str, token: &str) -> Option<String> {
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
+    let claims = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .ok()?
+    .claims;
+    (claims.kind == TokenKind::Access)
+        .then_some(claims.sid)
+        .flatten()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn issue_token(
     secret: &str,
@@ -176,6 +228,7 @@ fn issue_token(
     ttl_secs: u64,
     refresh_session_id: Option<&str>,
     profile: Option<&str>,
+    sid: Option<&str>,
 ) -> Result<String, IdentityError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -188,6 +241,7 @@ fn issue_token(
         nonce: now.as_nanos().to_string(),
         refresh_session_id: refresh_session_id.map(str::to_owned),
         profile: profile.map(str::to_owned),
+        sid: sid.map(str::to_owned),
     };
     encode(
         &Header::default(),
@@ -220,6 +274,7 @@ fn decode_token(
         expires_at_unix: claims.exp as u64,
         refresh_session_id: claims.refresh_session_id,
         profile: claims.profile,
+        session_id: claims.sid,
     })
 }
 
@@ -271,5 +326,47 @@ mod tests {
         // The refresh token intentionally carries no profile — re-resolve on refresh.
         let rt = resp.refresh_token.unwrap();
         assert_eq!(validate_refresh_token(SECRET, &rt).unwrap().profile, None);
+    }
+
+    #[test]
+    fn a_session_id_round_trips_and_is_readable_past_expiry() {
+        let token = issue_access_token_for_session(SECRET, "alice", "user", None, "sid-1").unwrap();
+        let v = validate_access_token(SECRET, &token).unwrap();
+        assert_eq!(v.session_id.as_deref(), Some("sid-1"));
+        assert_eq!(
+            access_token_session_id(SECRET, &token).as_deref(),
+            Some("sid-1")
+        );
+        // Expired: refused as a bearer, but its session is still named (for a logout).
+        let expired = encode(
+            &Header::default(),
+            &Claims {
+                sub: "alice".into(),
+                role: "user".into(),
+                exp: 1,
+                kind: TokenKind::Access,
+                nonce: "n".into(),
+                refresh_session_id: None,
+                profile: None,
+                sid: Some("sid-2".into()),
+            },
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap();
+        assert!(validate_access_token(SECRET, &expired).is_err());
+        assert_eq!(
+            access_token_session_id(SECRET, &expired).as_deref(),
+            Some("sid-2")
+        );
+        // Forged, a refresh token, a token without one: none.
+        assert_eq!(access_token_session_id("other-secret", &token), None);
+        let rt = issue_refresh_token(SECRET, "alice", "user").unwrap();
+        assert_eq!(access_token_session_id(SECRET, &rt), None);
+        let plain = issue_access_token(SECRET, "alice", "user").unwrap();
+        assert_eq!(access_token_session_id(SECRET, &plain), None);
+        assert_eq!(
+            validate_access_token(SECRET, &plain).unwrap().session_id,
+            None
+        );
     }
 }

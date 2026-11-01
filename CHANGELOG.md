@@ -19,6 +19,21 @@ version number.
   operation can tell that whoever consumes its progress has gone. See the fix
   below for why that matters.
 
+### Changed
+- **`CredentialStore` logout ends the whole sign-in session, and its forks.**
+  Access tokens now carry a session id (`sid`, one per login, kept through
+  refresh, a new one per `fork`, recorded as a fork of the forking session).
+  `logout` / `revoke_refresh_token` end that session: `validate_bearer` refuses
+  *every* access token of it at once (before, only the one presented, so an
+  older token of the same chain stayed valid until it expired), its refresh
+  tokens are dropped, and every session forked from it (recursively) ends too.
+  Ending a fork never ends the session it came from. The check is an in-memory
+  lookup. **Breaking for custom stores:** `SessionStore` gains `put_fork`,
+  `forks_of`, `end_session` and `is_ended`, `put_refresh` extends fork links
+  (`extend_fork_links`), and `RefreshSession` gains `sid` (`#[serde(default)]`,
+  so entries persisted before it still load; a refresh of one starts a new
+  session). Tokens issued without a `sid` validate as before.
+
 ### Fixed
 - **A unary call outlived its caller.** `serve_dispatch` runs every request in
   a task of its own, so closing the connection dropped only the HTTP side and

@@ -34,6 +34,14 @@
 //! A store is only ever handed the SHA-256 of a token (see [`session_key`]), so
 //! whatever it persists cannot be replayed as a credential.
 //!
+//! **Ending a session ends every token of it.** Each login starts a sign-in *session* (an id
+//! carried by every access token and refresh entry of it, kept through rotation; a
+//! [`fork`](CredentialStore::fork) starts a new one, recorded as a fork of the forking session).
+//! [`logout`](CredentialStore::logout) ends the session (and, in turn, every session forked from it):
+//! from then on [`validate_bearer`](BearerTokenValidator::validate_bearer) refuses *every* access
+//! token of it at once, not only the one presented, and its refresh tokens are dropped. Ending a
+//! fork never ends the session it was forked from.
+//!
 //! An optional **absolute session cap** ([`SessionOptions::max_session_secs`])
 //! bounds how long one sign-in can be kept alive by refreshing: every refresh
 //! entry carries the time of the original login, unchanged through rotation.
@@ -110,11 +118,32 @@ pub struct RefreshSession {
     /// Unix seconds of the original login (credentials or SSO) — carried
     /// unchanged through every rotation, so an absolute cap can be enforced.
     pub login_at: u64,
+    /// The sign-in session the token continues (one per login, unchanged through rotation, a new
+    /// one per fork). Empty for an entry persisted before session ids existed (a refresh of it
+    /// starts a new session).
+    #[serde(default)]
+    pub sid: String,
 }
+
+/// A fork's link to the session it was forked from, as a [`SessionStore`] keeps it (under the
+/// fork's session id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkLink {
+    /// The session id the fork was made from.
+    pub parent: String,
+    /// Unix seconds from which the link may be dropped: no token of the fork (or of a fork of it)
+    /// can be live by then. Extended by [`SessionStore::put_refresh`].
+    pub expires_at: u64,
+}
+
+/// How long an ended session stays recorded past the access TTL: the JWT validation leeway
+/// (60 s) plus a margin, so no access token issued before the end outlives the record.
+const ENDED_GRACE_SECS: u64 = 120;
 
 /// Where [`CredentialStore`] keeps session state: live refresh tokens and
 /// revoked access tokens, each under an opaque key (the hex SHA-256 of the
-/// token, see [`session_key`]).
+/// token, see [`session_key`]); and, by session id, the sessions that have ended
+/// and which session each fork was made from.
 ///
 /// Methods are synchronous and infallible: a store backs every login, refresh,
 /// logout and authenticated request, and a durable store that cannot persist
@@ -125,7 +154,10 @@ pub struct RefreshSession {
 /// of the same token race.
 pub trait SessionStore: Send + Sync + 'static {
     /// Drops every refresh session expired at `now` (`expires_at <= now`), then
-    /// stores `session` under `key`.
+    /// stores `session` under `key`. Also extends the [`ForkLink`] of
+    /// `session.sid`, and of each session it was forked from in turn, to at least
+    /// `session.expires_at` (see [`extend_fork_links`]): a fork that is still
+    /// refreshed keeps its lineage.
     fn put_refresh(&self, key: &str, session: RefreshSession, now: u64);
 
     /// Removes and returns the refresh session under `key`, expired or not (the
@@ -160,6 +192,66 @@ pub trait SessionStore: Send + Sync + 'static {
 
     /// Whether `key` is revoked and the revocation has not expired at `now`.
     fn is_revoked(&self, key: &str, now: u64) -> bool;
+
+    /// Drops every fork link expired at `now`, then records that session `child`
+    /// was forked from session `parent` (kept until `expires_at`, see
+    /// [`ForkLink`]).
+    fn put_fork(&self, child: &str, parent: &str, expires_at: u64, now: u64);
+
+    /// The sessions forked directly from `parent` (ended or not).
+    fn forks_of(&self, parent: &str) -> Vec<String>;
+
+    /// Drops every ended-session record expired at `now`, records session `sid`
+    /// as ended until `until`, then drops every refresh session of `sid` — in
+    /// that order (a refresh that puts a new token of `sid` concurrently either
+    /// has it dropped here or sees the record when it checks
+    /// [`is_ended`](SessionStore::is_ended) after putting it).
+    fn end_session(&self, sid: &str, until: u64, now: u64);
+
+    /// Whether session `sid` has ended (and the record has not expired at `now`).
+    /// Asked on every authenticated request: must not wait on I/O.
+    fn is_ended(&self, sid: &str, now: u64) -> bool;
+}
+
+/// The [`SessionStore::put_refresh`] rule for a store keeping its links in a map
+/// (fork session id -> [`ForkLink`]): extends the link of `sid`, and of each
+/// session it was forked from in turn, to at least `expires_at`.
+pub fn extend_fork_links<M: ForkLinkMap + ?Sized>(links: &mut M, sid: &str, expires_at: u64) {
+    let mut cur = sid.to_owned();
+    // Bounded by the number of links: a (never expected) cycle cannot loop forever.
+    for _ in 0..links.link_count() {
+        let Some(link) = links.link_mut(&cur) else {
+            break;
+        };
+        link.expires_at = link.expires_at.max(expires_at);
+        cur = link.parent.clone();
+    }
+}
+
+/// A map of [`ForkLink`]s by fork session id, as [`extend_fork_links`] walks it.
+pub trait ForkLinkMap {
+    /// How many links there are.
+    fn link_count(&self) -> usize;
+    /// The link of `sid`, if any.
+    fn link_mut(&mut self, sid: &str) -> Option<&mut ForkLink>;
+}
+
+impl ForkLinkMap for HashMap<String, ForkLink> {
+    fn link_count(&self) -> usize {
+        self.len()
+    }
+    fn link_mut(&mut self, sid: &str) -> Option<&mut ForkLink> {
+        self.get_mut(sid)
+    }
+}
+
+impl ForkLinkMap for std::collections::BTreeMap<String, ForkLink> {
+    fn link_count(&self) -> usize {
+        self.len()
+    }
+    fn link_mut(&mut self, sid: &str) -> Option<&mut ForkLink> {
+        self.get_mut(sid)
+    }
 }
 
 /// The default [`SessionStore`]: two in-memory maps, lost when the process ends.
@@ -167,6 +259,10 @@ pub trait SessionStore: Send + Sync + 'static {
 pub struct MemorySessionStore {
     refresh: Mutex<HashMap<String, RefreshSession>>,
     revoked: Mutex<HashMap<String, u64>>,
+    /// session id -> unix seconds the ended record expires.
+    ended: Mutex<HashMap<String, u64>>,
+    /// fork session id -> its link to the session it was forked from.
+    forks: Mutex<HashMap<String, ForkLink>>,
 }
 
 impl MemorySessionStore {
@@ -178,6 +274,9 @@ impl MemorySessionStore {
 
 impl SessionStore for MemorySessionStore {
     fn put_refresh(&self, key: &str, session: RefreshSession, now: u64) {
+        if !session.sid.is_empty() {
+            extend_fork_links(&mut *lock(&self.forks), &session.sid, session.expires_at);
+        }
         let mut map = lock(&self.refresh);
         map.retain(|_, s| s.expires_at > now);
         map.insert(key.to_owned(), session);
@@ -207,6 +306,39 @@ impl SessionStore for MemorySessionStore {
 
     fn is_revoked(&self, key: &str, now: u64) -> bool {
         lock(&self.revoked).get(key).is_some_and(|e| *e > now)
+    }
+
+    fn put_fork(&self, child: &str, parent: &str, expires_at: u64, now: u64) {
+        let mut map = lock(&self.forks);
+        map.retain(|_, l| l.expires_at > now);
+        map.insert(
+            child.to_owned(),
+            ForkLink {
+                parent: parent.to_owned(),
+                expires_at,
+            },
+        );
+    }
+
+    fn forks_of(&self, parent: &str) -> Vec<String> {
+        lock(&self.forks)
+            .iter()
+            .filter(|(_, l)| l.parent == parent)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    fn end_session(&self, sid: &str, until: u64, now: u64) {
+        {
+            let mut map = lock(&self.ended);
+            map.retain(|_, e| *e > now);
+            map.insert(sid.to_owned(), until);
+        }
+        lock(&self.refresh).retain(|_, s| s.sid != sid);
+    }
+
+    fn is_ended(&self, sid: &str, now: u64) -> bool {
+        lock(&self.ended).get(sid).is_some_and(|e| *e > now)
     }
 }
 
@@ -336,7 +468,7 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .verify_credentials(credentials)
             .await?
             .ok_or(IdentityError::InvalidCredentials)?;
-        self.issue_for(&user, now_secs()).await
+        self.issue_for(&user, now_secs(), &new_sid()).await
     }
 
     /// Exchanges a valid refresh token for a new token pair, **re-resolving** the
@@ -344,7 +476,9 @@ impl<B: CredentialBackend> CredentialStore<B> {
     /// refresh token). The token is consumed first and checked second, so it is
     /// single-use even when two refreshes race or it turns out expired. Past the
     /// absolute cap ([`SessionOptions::max_session_secs`]) the refresh is refused
-    /// exactly like an expired token.
+    /// exactly like an expired token, and so is a token of an ended session. The
+    /// new pair stays in the same sign-in session; access tokens issued earlier
+    /// in it stay valid until they expire (or the session ends).
     pub async fn refresh(&self, refresh_token: &str) -> Result<TokenResponse, IdentityError> {
         let session = self
             .inner
@@ -352,11 +486,7 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .take_refresh(&session_key(refresh_token))
             .ok_or(IdentityError::InvalidRefreshToken)?;
         let now = now_secs();
-        let capped = self
-            .inner
-            .max_session_secs
-            .is_some_and(|cap| now.saturating_sub(session.login_at) > cap);
-        if session.expires_at <= now || capped {
+        if self.refused(&session, now) {
             return Err(IdentityError::InvalidRefreshToken);
         }
         let user = self
@@ -365,7 +495,39 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .resolve_user(&session.handle)
             .await?
             .ok_or(IdentityError::InvalidRefreshToken)?;
-        self.issue_for(&user, session.login_at).await
+        let sid = if session.sid.is_empty() {
+            new_sid()
+        } else {
+            session.sid.clone()
+        };
+        let resp = self.issue_for(&user, session.login_at, &sid).await?;
+        // The session may have ended while the user was re-resolved: then the pair just issued
+        // must not leave (SessionStore::end_session says why a check after the put suffices).
+        if self.inner.sessions.is_ended(&sid, now_secs()) {
+            self.drop_issued(&resp);
+            return Err(IdentityError::InvalidRefreshToken);
+        }
+        Ok(resp)
+    }
+
+    /// A taken refresh entry that must not be honoured: expired, past the cap, or of an ended
+    /// session.
+    fn refused(&self, session: &RefreshSession, now: u64) -> bool {
+        let capped = self
+            .inner
+            .max_session_secs
+            .is_some_and(|cap| now.saturating_sub(session.login_at) > cap);
+        session.expires_at <= now
+            || capped
+            || (!session.sid.is_empty() && self.inner.sessions.is_ended(&session.sid, now))
+    }
+
+    /// Drops the refresh token of a pair that was issued but will not be handed out (its access
+    /// token never leaves the server).
+    fn drop_issued(&self, resp: &TokenResponse) {
+        if let Some(rt) = &resp.refresh_token {
+            self.inner.sessions.remove_refresh(&session_key(rt));
+        }
     }
 
     /// Splits one sign-in into two independent sessions: consumes `refresh_token`
@@ -382,6 +544,11 @@ impl<B: CredentialBackend> CredentialStore<B> {
     /// [`refresh`](CredentialStore::refresh)'s (consumed first, then expiry and
     /// cap, then the user re-resolved) and every refusal is the same plain
     /// [`IdentityError::InvalidRefreshToken`].
+    ///
+    /// The opener's pair stays in the caller's sign-in session; the child's pair
+    /// starts a new session recorded as a **fork** of it, so ending the caller's
+    /// session (a [`logout`](CredentialStore::logout)) ends the child's too, while
+    /// ending the child's leaves the caller's alone.
     pub async fn fork(
         &self,
         refresh_token: &str,
@@ -393,11 +560,7 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .take_refresh_for(&session_key(refresh_token), expected_handle)
             .ok_or(IdentityError::InvalidRefreshToken)?;
         let now = now_secs();
-        let capped = self
-            .inner
-            .max_session_secs
-            .is_some_and(|cap| now.saturating_sub(session.login_at) > cap);
-        if session.expires_at <= now || capped {
+        if self.refused(&session, now) {
             return Err(IdentityError::InvalidRefreshToken);
         }
         let user = self
@@ -406,15 +569,59 @@ impl<B: CredentialBackend> CredentialStore<B> {
             .resolve_user(&session.handle)
             .await?
             .ok_or(IdentityError::InvalidRefreshToken)?;
-        Ok(ForkedTokens {
-            opener: self.issue_for(&user, session.login_at).await?,
-            child: self.issue_for(&user, session.login_at).await?,
-        })
+        let opener_sid = if session.sid.is_empty() {
+            new_sid()
+        } else {
+            session.sid.clone()
+        };
+        let child_sid = new_sid();
+        // The link goes in before either pair exists: an end of the opener's session from here
+        // on reaches the child, or is seen by the check below.
+        let link_until = match self.inner.max_session_secs {
+            // No token of the family outlives the one sign-in's cap.
+            Some(cap) => session.login_at + cap + tokens::ACCESS_TOKEN_TTL_SECS + ENDED_GRACE_SECS,
+            // Extended by every refresh of the fork (SessionStore::put_refresh).
+            None => now + self.inner.refresh_ttl_secs,
+        };
+        self.inner
+            .sessions
+            .put_fork(&child_sid, &opener_sid, link_until, now);
+        let opener = self.issue_for(&user, session.login_at, &opener_sid).await?;
+        let child = self.issue_for(&user, session.login_at, &child_sid).await?;
+        if self.inner.sessions.is_ended(&opener_sid, now_secs()) {
+            self.drop_issued(&opener);
+            self.end_session_and_forks(&child_sid);
+            return Err(IdentityError::InvalidRefreshToken);
+        }
+        Ok(ForkedTokens { opener, child })
     }
 
-    /// Revokes an access token (until its natural expiry) and/or drops a refresh
-    /// token, so both are rejected on subsequent requests.
+    /// Ends session `sid` and, in turn, every session forked from it: every access token of them
+    /// is refused from now on and their refresh tokens are dropped.
+    fn end_session_and_forks(&self, sid: &str) {
+        let now = now_secs();
+        let until = now + tokens::ACCESS_TOKEN_TTL_SECS + ENDED_GRACE_SECS;
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![sid.to_owned()];
+        while let Some(s) = todo.pop() {
+            if !seen.insert(s.clone()) {
+                continue;
+            }
+            // Ended before its forks are listed: a fork made concurrently is either listed here
+            // or sees this session ended (fork's check after its put).
+            self.inner.sessions.end_session(&s, until, now);
+            todo.extend(self.inner.sessions.forks_of(&s));
+        }
+    }
+
+    /// Ends the sign-in session the tokens belong to, and every session forked
+    /// from it: from now on **every** access token of them is rejected (not only
+    /// the one presented) and their refresh tokens are dropped. The session is
+    /// named by the access token (a genuine one, expired or not) and/or by the
+    /// refresh token. The access token presented is also revoked on its own, which
+    /// is all a token issued without a session id gets.
     pub async fn logout(&self, access_token: Option<&str>, refresh_token: Option<&str>) {
+        let mut sids = Vec::new();
         if let Some(at) = access_token {
             let exp = tokens::validate_access_token(&self.inner.secret, at)
                 .map(|v| v.expires_at_unix)
@@ -422,9 +629,17 @@ impl<B: CredentialBackend> CredentialStore<B> {
             self.inner
                 .sessions
                 .revoke_access(&session_key(at), exp, now_secs());
+            sids.extend(tokens::access_token_session_id(&self.inner.secret, at));
         }
-        if let Some(rt) = refresh_token {
-            self.inner.sessions.remove_refresh(&session_key(rt));
+        if let Some(rt) = refresh_token
+            && let Some(s) = self.inner.sessions.take_refresh(&session_key(rt))
+            && !s.sid.is_empty()
+        {
+            sids.push(s.sid);
+        }
+        sids.dedup();
+        for sid in sids {
+            self.end_session_and_forks(&sid);
         }
     }
 
@@ -436,24 +651,35 @@ impl<B: CredentialBackend> CredentialStore<B> {
     /// longer-lived credential is the one you cannot revoke. Says nothing about
     /// whether the token existed — a host exposing this publicly must not leak
     /// which tokens are live.
+    ///
+    /// Like [`logout`](CredentialStore::logout), it ends the token's sign-in
+    /// session and the sessions forked from it.
     pub async fn revoke_refresh_token(&self, refresh_token: &str) {
-        self.inner
+        if let Some(s) = self
+            .inner
             .sessions
-            .remove_refresh(&session_key(refresh_token));
+            .take_refresh(&session_key(refresh_token))
+            && !s.sid.is_empty()
+        {
+            self.end_session_and_forks(&s.sid);
+        }
     }
 
-    /// Issues a token pair for `user`; `login_at` is the original login's time
-    /// (now for a login, the consumed entry's for a refresh).
+    /// Issues a token pair for `user` in sign-in session `sid`; `login_at` is
+    /// the original login's time (now for a login, the consumed entry's for a
+    /// refresh).
     async fn issue_for(
         &self,
         user: &AuthenticatedUser,
         login_at: u64,
+        sid: &str,
     ) -> Result<TokenResponse, IdentityError> {
-        let token = tokens::issue_access_token_with_profile(
+        let token = tokens::issue_access_token_for_session(
             &self.inner.secret,
             &user.handle,
             &user.role,
             user.profile.as_deref(),
+            sid,
         )?;
         let refresh = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
@@ -463,6 +689,7 @@ impl<B: CredentialBackend> CredentialStore<B> {
                 handle: user.handle.clone(),
                 expires_at: now + self.inner.refresh_ttl_secs,
                 login_at,
+                sid: sid.to_owned(),
             },
             now,
         );
@@ -487,6 +714,13 @@ impl<B: CredentialBackend> BearerTokenValidator for CredentialStore<B> {
             return None;
         }
         let v = tokens::validate_access_token(&self.inner.secret, token).ok()?;
+        // Every access token of an ended session (a logout, or the end of the session it was
+        // forked from) is refused at once: an in-memory lookup, no I/O.
+        if let Some(sid) = &v.session_id
+            && self.inner.sessions.is_ended(sid, now_secs())
+        {
+            return None;
+        }
         Some(match v.profile {
             Some(profile) => {
                 format!(
@@ -497,6 +731,11 @@ impl<B: CredentialBackend> BearerTokenValidator for CredentialStore<B> {
             None => format!("{}{CALLER_FIELD_SEP}{}", v.handle, v.role),
         })
     }
+}
+
+/// A new sign-in session id.
+fn new_sid() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn now_secs() -> u64 {
@@ -809,6 +1048,19 @@ mod tests {
             self.saw(key);
             self.inner.is_revoked(key, now)
         }
+        // Session ids are not token keys (they are random, never a token): not recorded.
+        fn put_fork(&self, child: &str, parent: &str, expires_at: u64, now: u64) {
+            self.inner.put_fork(child, parent, expires_at, now)
+        }
+        fn forks_of(&self, parent: &str) -> Vec<String> {
+            self.inner.forks_of(parent)
+        }
+        fn end_session(&self, sid: &str, until: u64, now: u64) {
+            self.inner.end_session(sid, until, now)
+        }
+        fn is_ended(&self, sid: &str, now: u64) -> bool {
+            self.inner.is_ended(sid, now)
+        }
     }
 
     #[tokio::test]
@@ -908,14 +1160,15 @@ mod tests {
         let c2 = s.refresh(&c).await.unwrap().refresh_token.unwrap();
         assert!(s.refresh(&o3).await.is_ok());
         assert!(s.refresh(&c2).await.is_ok());
-        // Logging one out leaves the other alive.
+        // Logging the child out leaves the opener alive (the opener's logout ends the child:
+        // logout_ends_the_forks_and_the_forks_of_forks).
         let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
         let f2 = s.fork(&rt, "alice").await.unwrap();
-        s.logout(Some(&f2.opener.token), f2.opener.refresh_token.as_deref())
+        s.logout(Some(&f2.child.token), f2.child.refresh_token.as_deref())
             .await;
-        assert!(s.validate_bearer(&f2.child.token).is_some());
-        let child_rt = f2.child.refresh_token.as_deref().unwrap();
-        assert!(s.refresh(child_rt).await.is_ok());
+        assert!(s.validate_bearer(&f2.opener.token).is_some());
+        let opener_rt = f2.opener.refresh_token.as_deref().unwrap();
+        assert!(s.refresh(opener_rt).await.is_ok());
     }
 
     #[tokio::test]
@@ -1032,5 +1285,247 @@ mod tests {
         let rt = s.login(alice()).await.unwrap().refresh_token.unwrap();
         backdate_login(&mem, 10 * 365 * 86_400);
         assert!(s.refresh(&rt).await.is_ok());
+    }
+
+    // ---- ending a session: every access token of it, and its forks ----
+
+    fn sid_of(s: &CredentialStore<TestBackend>, token: &str) -> String {
+        tokens::validate_access_token(&s.inner.secret, token)
+            .unwrap()
+            .session_id
+            .expect("issued with a session id")
+    }
+
+    #[tokio::test]
+    async fn logout_refuses_every_access_token_of_the_session_at_once() {
+        let s = store(alice_backend().await);
+        let first = s.login(alice()).await.unwrap();
+        let second = s
+            .refresh(first.refresh_token.as_deref().unwrap())
+            .await
+            .unwrap();
+        // A refresh keeps the session: the new token is valid, and so (until it expires) is the
+        // one it replaced, as before session ids.
+        assert_eq!(sid_of(&s, &first.token), sid_of(&s, &second.token));
+        assert!(s.validate_bearer(&second.token).is_some());
+        assert!(s.validate_bearer(&first.token).is_some());
+        let third = s
+            .refresh(second.refresh_token.as_deref().unwrap())
+            .await
+            .unwrap();
+        // The logout presents only the newest pair; the older access tokens die with it.
+        s.logout(Some(&third.token), third.refresh_token.as_deref())
+            .await;
+        for t in [&first.token, &second.token, &third.token] {
+            assert!(
+                s.validate_bearer(t).is_none(),
+                "a token of the ended session"
+            );
+        }
+        assert!(
+            s.refresh(third.refresh_token.as_deref().unwrap())
+                .await
+                .is_err()
+        );
+        // Another sign-in of the same user is untouched.
+        let other = s.login(alice()).await.unwrap();
+        assert!(s.validate_bearer(&other.token).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_logout_by_refresh_token_alone_ends_the_session_too() {
+        let s = store(alice_backend().await);
+        let resp = s.login(alice()).await.unwrap();
+        s.logout(None, resp.refresh_token.as_deref()).await;
+        assert!(s.validate_bearer(&resp.token).is_none());
+        let resp = s.login(alice()).await.unwrap();
+        s.revoke_refresh_token(resp.refresh_token.as_deref().unwrap())
+            .await;
+        assert!(s.validate_bearer(&resp.token).is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_ends_the_forks_and_the_forks_of_forks() {
+        let s = store(alice_backend().await);
+        let root = s.login(alice()).await.unwrap();
+        let f = s
+            .fork(root.refresh_token.as_deref().unwrap(), "alice")
+            .await
+            .unwrap();
+        // The opener stays in its session; the child is a new one.
+        assert_eq!(sid_of(&s, &root.token), sid_of(&s, &f.opener.token));
+        assert_ne!(sid_of(&s, &f.opener.token), sid_of(&s, &f.child.token));
+        let g = s
+            .fork(f.child.refresh_token.as_deref().unwrap(), "alice")
+            .await
+            .unwrap();
+        let all = [
+            &root.token,
+            &f.opener.token,
+            &f.child.token,
+            &g.opener.token,
+            &g.child.token,
+        ];
+        assert!(all.iter().all(|t| s.validate_bearer(t).is_some()));
+        s.logout(Some(&f.opener.token), f.opener.refresh_token.as_deref())
+            .await;
+        for t in all {
+            assert!(s.validate_bearer(t).is_none(), "every token of the family");
+        }
+        for rt in [&g.opener.refresh_token, &g.child.refresh_token] {
+            assert!(s.refresh(rt.as_deref().unwrap()).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fork_ending_never_ends_the_session_it_came_from() {
+        let s = store(alice_backend().await);
+        let root = s.login(alice()).await.unwrap();
+        let f = s
+            .fork(root.refresh_token.as_deref().unwrap(), "alice")
+            .await
+            .unwrap();
+        let g = s
+            .fork(f.child.refresh_token.as_deref().unwrap(), "alice")
+            .await
+            .unwrap();
+        // The child logs out: it and its own fork end, the opener lives on.
+        s.logout(Some(&g.opener.token), g.opener.refresh_token.as_deref())
+            .await;
+        assert!(s.validate_bearer(&g.opener.token).is_none());
+        assert!(s.validate_bearer(&g.child.token).is_none());
+        assert!(s.validate_bearer(&f.opener.token).is_some());
+        assert!(s.validate_bearer(&root.token).is_some());
+        let next = s
+            .refresh(f.opener.refresh_token.as_deref().unwrap())
+            .await
+            .expect("the opener's chain lives");
+        assert!(s.validate_bearer(&next.token).is_some());
+        // …and can still fork.
+        assert!(
+            s.fork(next.refresh_token.as_deref().unwrap(), "alice")
+                .await
+                .is_ok()
+        );
+    }
+
+    /// A backend that ends a session (as a concurrent logout would) while it re-resolves the user.
+    #[derive(Clone)]
+    struct EndingBackend {
+        inner: TestBackend,
+        mem: Arc<MemorySessionStore>,
+        end: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl CredentialBackend for EndingBackend {
+        type Credentials = Creds;
+        async fn verify_credentials(
+            &self,
+            c: Creds,
+        ) -> Result<Option<AuthenticatedUser>, IdentityError> {
+            self.inner.verify_credentials(c).await
+        }
+        async fn resolve_user(
+            &self,
+            handle: &str,
+        ) -> Result<Option<AuthenticatedUser>, IdentityError> {
+            if let Some(sid) = lock(&self.end).take() {
+                self.mem.end_session(&sid, u64::MAX, 0);
+            }
+            self.inner.resolve_user(handle).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_or_fork_racing_the_end_of_its_session_hands_out_nothing() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let backend = EndingBackend {
+            inner: alice_backend().await,
+            mem: mem.clone(),
+            end: Arc::default(),
+        };
+        let s = CredentialStore::new_with_options(
+            backend.clone(),
+            "test-secret",
+            SessionOptions {
+                store: mem.clone(),
+                ..SessionOptions::default()
+            },
+        );
+        let sid = |t: &str| {
+            tokens::validate_access_token("test-secret", t)
+                .unwrap()
+                .session_id
+                .unwrap()
+        };
+        for forking in [false, true] {
+            let resp = s.login(alice()).await.unwrap();
+            *lock(&backend.end) = Some(sid(&resp.token));
+            let rt = resp.refresh_token.as_deref().unwrap();
+            let refused = if forking {
+                s.fork(rt, "alice").await.is_err()
+            } else {
+                s.refresh(rt).await.is_err()
+            };
+            assert!(refused, "forking={forking}");
+            assert!(
+                lock(&mem.refresh).is_empty(),
+                "no refresh token of the ended session (or its fork) is left, forking={forking}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entry_saved_before_session_ids_refreshes_into_a_new_session() {
+        let mem = Arc::new(MemorySessionStore::new());
+        let s = store_with(alice_backend().await, &mem, 3600, None);
+        let now = now_secs();
+        mem.put_refresh(
+            &session_key("legacy-rt"),
+            serde_json::from_str::<RefreshSession>(&format!(
+                r#"{{"handle":"alice","expires_at":{},"login_at":{now}}}"#,
+                now + 600
+            ))
+            .unwrap(),
+            now,
+        );
+        let resp = s.refresh("legacy-rt").await.unwrap();
+        let sid = sid_of(&s, &resp.token);
+        assert!(!sid.is_empty());
+        s.logout(Some(&resp.token), None).await;
+        assert!(s.validate_bearer(&resp.token).is_none());
+        // An access token issued without a session id is still revoked on its own by a logout.
+        let plain = tokens::issue_access_token("test-secret", "alice", "user").unwrap();
+        assert!(s.validate_bearer(&plain).is_some());
+        s.logout(Some(&plain), None).await;
+        assert!(s.validate_bearer(&plain).is_none());
+    }
+
+    #[test]
+    fn a_refresh_of_a_fork_extends_its_lineage_up_the_family() {
+        let mem = MemorySessionStore::new();
+        mem.put_fork("child", "root", 100, 0);
+        mem.put_fork("grandchild", "child", 100, 0);
+        mem.put_refresh(
+            "k",
+            RefreshSession {
+                handle: "alice".into(),
+                expires_at: 500,
+                login_at: 0,
+                sid: "grandchild".into(),
+            },
+            0,
+        );
+        let forks = lock(&mem.forks);
+        assert_eq!(forks["grandchild"].expires_at, 500);
+        assert_eq!(forks["child"].expires_at, 500);
+        drop(forks);
+        // Expired links are swept by the next fork.
+        mem.put_fork("other", "root", 1000, 600);
+        assert_eq!(mem.forks_of("root"), vec!["other".to_owned()]);
+        // Ended records expire.
+        mem.end_session("x", 10, 0);
+        assert!(mem.is_ended("x", 9));
+        assert!(!mem.is_ended("x", 10));
     }
 }
