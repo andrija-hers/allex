@@ -2,7 +2,7 @@
 
 > Derive-macro support for allex-state.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 Generates the snapshot/delta plumbing for your state types so you don't hand-write
 it. Normally pulled in via `allex-state`.

@@ -2,7 +2,7 @@
 
 > Generate a typed TypeScript client from an allex rpc_module source.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 Like its Dart sibling, it parses Rust source, emits only the DTOs reachable from
 method signatures, and matches the exact serde JSON wire format (`rename_all` on

@@ -2,7 +2,7 @@
 
 > Transport-agnostic dispatch loop and the ambient caller context.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 Drives requests off a transport and into the registry: `serve_dispatch` drains a
 transport and spawns a task per request. Deliberately **transport-agnostic** — it

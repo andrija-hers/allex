@@ -2,7 +2,7 @@
 
 > Pooled Postgres access with a FromRow derive.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 `Db` wraps a `deadpool_postgres` pool; run queries with
 `with_client(|client| async { … })`. Ships a `FromRow` derive (from

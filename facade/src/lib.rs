@@ -20,7 +20,7 @@
 //! With the default features you get [`host`], [`serve`], the contract stack
 //! ([`transport`], [`execution`], [`progressable`], and the `rpc_module` macro),
 //! and [`identity`]. See the crate's `Cargo.toml` for the full feature list, and
-//! the [repository](https://codeberg.org/andrija/allex) for the full README,
+//! the [repository](https://github.com/andrija-hers/allex) for the full README,
 //! `AGENTS.md` (the orientation guide), and `COMPARISON.md`.
 //!
 //! Each module below is the corresponding `allex-*` crate; consult its own docs

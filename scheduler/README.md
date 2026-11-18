@@ -2,7 +2,7 @@
 
 > A pure, clock-free tick engine for recurring tasks.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 A scheduler that is deliberately *not* a timer. It owns no clock and spawns no
 threads: you pass it "now", and it tells you what should have fired since the last

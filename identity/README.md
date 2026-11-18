@@ -2,7 +2,7 @@
 
 > The IdentityV1 service, JWT engine, and pluggable user seams.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 The identity layer for allex: the `IdentityV1` service (`register` / `login` /
 `refresh` / `validate` / `logout`), a reusable JWT engine (`identity::tokens`),

@@ -2,7 +2,7 @@
 
 > Run an external script/executable with a typed result.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 Run an external script or executable as a typed operation: pass arguments and
 environment in, get captured output out, and a **non-zero exit code mapped to a

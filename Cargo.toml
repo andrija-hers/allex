@@ -42,5 +42,4 @@ authors = [
     "Luka Petrović <lukapetrovicsi@gmail.com>",
 ]
 license = "MIT OR Apache-2.0"
-repository = "https://codeberg.org/andrija/allex"
-homepage = "https://codeberg.org/andrija/allex"
+repository = "https://github.com/andrija-hers/allex"

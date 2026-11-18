@@ -2,7 +2,7 @@
 
 > The FromRow derive macro behind allex-postgres.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 Generates the boilerplate to build a struct from a `tokio_postgres::Row`,
 resolving column names and types against the re-exports in `allex-postgres`.

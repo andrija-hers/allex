@@ -2,7 +2,7 @@
 
 > The proc-macro that makes a service *a trait*.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 `#[rpc_module] trait FooV1 { … }` expands into a typed `FooV1Client`, a
 server-side `FooV1MethodResponder`, and `FooV1MethodPermissions`. A method's

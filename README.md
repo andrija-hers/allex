@@ -7,7 +7,7 @@ authorization checks — and separate codegen emits byte-compatible **Dart** and
 dispatch, identity, streaming, and state.
 
 > Status: **0.x, pre-1.0.** The API will change between minor versions. allex is
-> developed on [Codeberg](https://codeberg.org/andrija/allex); releases are
+> developed on [GitHub](https://github.com/andrija-hers/allex); releases are
 > published to crates.io. See [Support & contributions](#support--contributions).
 
 ## Why allex
@@ -131,11 +131,11 @@ Once the first release is on crates.io:
 allex-host = "0.1"
 ```
 
-Until then (or to track development), depend on it from Codeberg:
+Until then (or to track development), depend on it from GitHub:
 
 ```toml
 [dependencies]
-allex-host = { git = "https://codeberg.org/andrija/allex", tag = "v0.1.0" }
+allex-host = { git = "https://github.com/andrija-hers/allex", tag = "v0.1.0" }
 ```
 
 **MSRV:** Rust 1.97. allex tracks a recent stable toolchain (its dependencies and
@@ -163,7 +163,7 @@ allex is built in the open, but it is **solo-maintained and offered as-is** (see
 the license). Concretely, that means:
 
 - **No support guarantee and no SLA.** Bug reports and questions are welcome via
-  the [Codeberg issue tracker](https://codeberg.org/andrija/allex/issues), but
+  the [GitHub issue tracker](https://github.com/andrija-hers/allex/issues), but
   there is no promise of a response time, a fix, or long-term support.
 - **The roadmap is the maintainer's.** Feature requests are read with interest,
   but allex is shaped by its own goals; "won't do" is a valid and common answer,

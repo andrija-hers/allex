@@ -11,7 +11,7 @@ under short module names, feature-gated, so you can pull in the framework with o
 dependency and enable only what you use.
 
 > Status: **0.x, pre-1.0.** The API will change between minor versions. Developed
-> on [Codeberg](https://codeberg.org/andrija/allex); the full README, the
+> on [GitHub](https://github.com/andrija-hers/allex); the full README, the
 > orientation guide `AGENTS.md`, and `COMPARISON.md` live there.
 
 ## Install
@@ -102,7 +102,7 @@ let who = allex::serve::caller_handle()?;   // also caller_role(), caller_profil
 
 The full walkthrough — the contract → api → svc-host crate layout, the identity
 decision guide, the error→HTTP-status rules, and how allex compares to gRPC / tRPC
-/ ConnectRPC — is in the [repository](https://codeberg.org/andrija/allex).
+/ ConnectRPC — is in the [repository](https://github.com/andrija-hers/allex).
 
 ## Prefer the individual crates?
 

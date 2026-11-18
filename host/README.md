@@ -2,7 +2,7 @@
 
 > Batteries-included axum host builder — start here for a new backend.
 
-Part of **[allex](https://codeberg.org/andrija/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
+Part of **[allex](https://github.com/andrija-hers/allex)** — a contract-first RPC framework for Rust. See the repository for the workspace overview and `AGENTS.md`, the project's orientation guide.
 
 `ServiceHost` owns the `Registry` + `AxumTransport` + `serve_dispatch` wiring
 (including the one spawn-order footgun) and hands you back a plain `axum::Router`,

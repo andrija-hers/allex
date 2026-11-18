@@ -2,7 +2,7 @@
 
 allex is a 28-crate workspace published to [crates.io](https://crates.io). The
 crates share **one version number** and are released together. Source of truth is
-[Codeberg](https://codeberg.org/andrija/allex); crates.io receives release
+[GitHub](https://github.com/andrija-hers/allex); crates.io receives release
 tarballs only.
 
 ## Prerequisites (one-time)
@@ -39,15 +39,15 @@ Execute:
 cargo release <level|version> --execute
 ```
 
-Then push the commit and tag to Codeberg:
+Then push the commit and tag to GitHub:
 
 ```sh
 git push origin main --follow-tags
 ```
 
-> Why not `release-plz`? It is excellent but its automation (release PRs) is
-> GitHub/GitLab-first; on Codeberg (Forgejo) that path is less proven.
-> `cargo-release` only needs git + crates.io, so it fits this setup cleanly.
+> Why `cargo-release` and not `release-plz`? `cargo-release` only needs git +
+> crates.io. Now that the repository is on GitHub, release-plz's release-PR
+> automation would work too; switching is optional.
 
 ## Manual fallback (if not using a tool)
 
