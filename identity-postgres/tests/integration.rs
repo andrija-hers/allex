@@ -483,3 +483,135 @@ async fn delete_account_revokes_refresh_tokens_so_a_deleted_user_cannot_mint_ses
         Err(IdentityError::InvalidRefreshToken)
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Refresh tokens are stored only as hashes
+// ---------------------------------------------------------------------------
+
+async fn start_store_and_db() -> (
+    PostgresIdentityStore,
+    Db,
+    testcontainers::ContainerAsync<Postgres>,
+) {
+    let container = Postgres::default()
+        .start()
+        .await
+        .expect("Docker must be running");
+    let host = container.get_host().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let conn_str = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    let db = Db::connect(&conn_str).expect("valid connection string");
+    let store = PostgresIdentityStore::new(db.clone(), SECRET);
+    store.setup().await.expect("schema setup must succeed");
+    (store, db, container)
+}
+
+async fn stored_keys(db: &Db) -> Vec<String> {
+    db.get_client()
+        .await
+        .unwrap()
+        .query("SELECT token FROM refresh_tokens", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<_, String>("token"))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_table_never_holds_a_token_a_client_was_given() {
+    let (store, db, _c) = start_store_and_db().await;
+    let first = store.register(reg("alice", "pw")).await.unwrap();
+    let rt1 = first.refresh_token.unwrap();
+    let second = store
+        .refresh(RefreshRequest {
+            refresh_token: rt1.clone(),
+        })
+        .await
+        .unwrap();
+    let rt2 = second.refresh_token.unwrap();
+
+    let keys = stored_keys(&db).await;
+    assert_eq!(keys.len(), 2, "the rotated token and its successor");
+    for given in [&rt1, &rt2] {
+        assert!(!keys.contains(given), "plaintext token found in the table");
+        assert!(
+            keys.contains(&allex_identity_postgres::refresh_token_key(given)),
+            "every token is findable by its key"
+        );
+    }
+    let replaced_by: Option<String> = db
+        .get_client()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT replaced_by FROM refresh_tokens WHERE replaced_by IS NOT NULL",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get("replaced_by");
+    assert_eq!(
+        replaced_by.as_deref(),
+        Some(allex_identity_postgres::refresh_token_key(&rt2).as_str()),
+        "the successor link is a key too, not the successor itself"
+    );
+}
+
+#[tokio::test]
+async fn upgrading_hashes_existing_plaintext_sessions_without_signing_anyone_out() {
+    let (store, db, _c) = start_store_and_db().await;
+    store.register(reg("bob", "pw")).await.unwrap();
+    // A row as a store from before hashing wrote it: the UUID itself.
+    let legacy = "6f1c1b7e-2f5a-4c3e-9a51-0d4b8f2e7c19";
+    db.get_client()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO refresh_tokens (token, handle, role, expires_at) \
+             VALUES ($1, 'bob', 'user', now() + interval '1 day')",
+            &[&legacy],
+        )
+        .await
+        .unwrap();
+
+    store.setup().await.expect("setup migrates in place");
+    store
+        .setup()
+        .await
+        .expect("and a second run changes nothing");
+
+    let keys = stored_keys(&db).await;
+    assert!(
+        !keys.iter().any(|k| k == legacy),
+        "plaintext survived setup"
+    );
+    let res = store
+        .refresh(RefreshRequest {
+            refresh_token: legacy.into(),
+        })
+        .await
+        .expect("the session that existed before the upgrade still refreshes");
+    assert_eq!(res.handle, "bob");
+}
+
+#[tokio::test]
+async fn logout_and_revoke_find_a_token_by_its_key() {
+    let (store, db, _c) = start_store_and_db().await;
+    let a = store.register(reg("carol", "pw")).await.unwrap();
+    let b = store.login(login("carol", "pw")).await.unwrap();
+    store
+        .logout(LogoutRequest {
+            token: Some(a.token.clone()),
+            refresh_token: a.refresh_token.clone(),
+        })
+        .await
+        .unwrap();
+    store
+        .revoke_refresh_token(identity::RevokeRefreshTokenRequest {
+            refresh_token: b.refresh_token.clone().unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(stored_keys(&db).await.is_empty(), "both sessions are gone");
+}

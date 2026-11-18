@@ -22,6 +22,52 @@ use identity::{
 
 const FORGOT_PASSWORD_TEMPLATE_KEY: &str = "forgot_password";
 
+/// The key under which a refresh token is stored: the lowercase hex SHA-256 of
+/// the token the client holds.
+///
+/// The `refresh_tokens` table never holds a usable token. A refresh token is
+/// 122 random bits, so an unsalted fast hash is enough — there is nothing to
+/// brute-force — and a copy of the table (a backup, a replica, a stolen dump)
+/// can no longer be replayed as live sessions. Every query that names a token
+/// goes through this; a host that reads the table itself (to check a session is
+/// still live, say) must do the same, which is why it is public.
+pub fn refresh_token_key(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    to_hex(&Sha256::digest(token.as_bytes()))
+}
+
+/// Length of a [`refresh_token_key`]; a stored value of any other length is a
+/// plaintext token left over from before keys were hashed (see `setup`).
+const REFRESH_KEY_LEN: i32 = 64;
+
+/// The successor a refresh token rotates into, derived rather than random.
+///
+/// Rotation has a grace window: a near-simultaneous second use of the old
+/// token (two tabs, a retried request) is handed the *same* successor instead
+/// of being signed out. With only hashes stored, that successor cannot be read
+/// back — so it is computed: HMAC-SHA256 under the store's secret over the old
+/// token. Both racers derive the same value, the table checks it against the
+/// stored `replaced_by` key, and nobody without the secret can predict it. The
+/// secret already signs every access token, so knowing it grants nothing new.
+fn successor_token(secret: &str, old_token: &str) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(b"allex-refresh-successor\0");
+    mac.update(old_token.as_bytes());
+    to_hex(&mac.finalize().into_bytes())
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[derive(Serialize, Deserialize)]
 struct Claims {
     sub: String,
@@ -113,6 +159,32 @@ impl PostgresIdentityStore {
                         "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_handle \
                          ON refresh_tokens (handle)",
                         &[],
+                    )
+                    .await?;
+                // Hash the keys of a deployment that predates hashing, in place,
+                // so nobody is signed out: a stored value that is not 64 hex
+                // characters is a plaintext token (UUIDs are 36), and its key is
+                // what `refresh_token_key` would compute from it. Idempotent —
+                // a second run finds nothing to change — and safe if two nodes
+                // start at once. `replaced_by` is converted separately because a
+                // row's successor may or may not have been converted already.
+                // A token rotated in the last 30 seconds before this ran loses
+                // its grace window (its successor was random, not derived): one
+                // racing request may be refused, once.
+                client
+                    .execute(
+                        "UPDATE refresh_tokens \
+                            SET token = encode(sha256(convert_to(token, 'UTF8')), 'hex') \
+                          WHERE length(token) <> $1",
+                        &[&REFRESH_KEY_LEN],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "UPDATE refresh_tokens \
+                            SET replaced_by = encode(sha256(convert_to(replaced_by, 'UTF8')), 'hex') \
+                          WHERE replaced_by IS NOT NULL AND length(replaced_by) <> $1",
+                        &[&REFRESH_KEY_LEN],
                     )
                     .await?;
                 client
@@ -229,14 +301,14 @@ impl PostgresIdentityStore {
         let db = self.db.clone();
         let handle = handle.to_string();
         let role = role.to_string();
-        let token_clone = token.clone();
+        let key = refresh_token_key(&token);
         db.get_client()
             .await
             .map_err(db_err)?
             .execute(
                 "INSERT INTO refresh_tokens (token, handle, role, expires_at)
                  VALUES ($1, $2, $3, now() + ($4 || ' seconds')::interval)",
-                &[&token_clone, &handle, &role, &ttl],
+                &[&key, &handle, &role, &ttl],
             )
             .await
             .map_err(db_err)?;
@@ -370,7 +442,9 @@ impl IdentityV1 for PostgresIdentityStore {
             // claim the token (only if not yet rotated and unexpired), point it
             // at a freshly-minted successor, and insert that successor — all of
             // which become visible together the instant this statement commits.
-            let new_refresh = uuid::Uuid::new_v4().to_string();
+            let old_key = refresh_token_key(&req.refresh_token);
+            let new_refresh = successor_token(&store.secret, &req.refresh_token);
+            let new_key = refresh_token_key(&new_refresh);
             let ttl = store.refresh_token_ttl_secs.to_string();
             let claimed = client
                 .query_opt(
@@ -384,7 +458,7 @@ impl IdentityV1 for PostgresIdentityStore {
                      SELECT $2, handle, role, now() + ($3 || ' seconds')::interval
                        FROM claimed
                      RETURNING handle, role",
-                    &[&req.refresh_token, &new_refresh, &ttl],
+                    &[&old_key, &new_key, &ttl],
                 )
                 .await
                 .map_err(db_err)?;
@@ -416,17 +490,18 @@ impl IdentityV1 for PostgresIdentityStore {
             // Not claimable: either already rotated, expired, or unknown. If it was
             // rotated within the grace window and has a still-valid successor, hand
             // that successor back (so a racing tab stays signed in instead of being
-            // bounced). Otherwise the token is invalid.
+            // bounced). Otherwise the token is invalid. The successor is derived
+            // from the token being presented, so only its key is compared here.
             let grace = client
                 .query_opt(
-                    "SELECT t.handle, t.role, t.replaced_by
+                    "SELECT t.handle, t.role
                      FROM refresh_tokens t
                      JOIN refresh_tokens s ON s.token = t.replaced_by
                      WHERE t.token = $1
-                       AND t.replaced_by IS NOT NULL
+                       AND t.replaced_by = $2
                        AND t.rotated_at > now() - interval '30 seconds'
                        AND s.expires_at > now()",
-                    &[&req.refresh_token],
+                    &[&old_key, &new_key],
                 )
                 .await
                 .map_err(db_err)?;
@@ -434,11 +509,10 @@ impl IdentityV1 for PostgresIdentityStore {
             if let Some(row) = grace {
                 let handle: String = row.try_get("handle").map_err(db_err)?;
                 let role: String = row.try_get("role").map_err(db_err)?;
-                let successor: String = row.try_get("replaced_by").map_err(db_err)?;
                 let token = store.issue_jwt(&handle, &role)?;
                 return Ok(TokenResponse {
                     token,
-                    refresh_token: Some(successor),
+                    refresh_token: Some(new_refresh),
                     handle,
                     role,
                 });
@@ -488,7 +562,7 @@ impl IdentityV1 for PostgresIdentityStore {
                     .map_err(|e| IdentityError::Internal(e.to_string()))?
                     .insert(token);
             }
-            if let Some(rt) = req.refresh_token {
+            if let Some(rt) = req.refresh_token.as_deref().map(refresh_token_key) {
                 let client = db.get_client().await.map_err(db_err)?;
                 match session_handle {
                     // Scoped by handle so a client that mixes up two sessions
@@ -547,7 +621,7 @@ impl IdentityV1 for PostgresIdentityStore {
             let _ = client
                 .execute(
                     "DELETE FROM refresh_tokens WHERE token = $1",
-                    &[&refresh_token],
+                    &[&refresh_token_key(&refresh_token)],
                 )
                 .await
                 .map_err(db_err)?;
