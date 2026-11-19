@@ -20,6 +20,19 @@ version number.
   below for why that matters.
 
 ### Changed
+- **`#[rpc_module]` compiles much faster: its tracing lives in `transport`.**
+  The generated client methods and responder arms expanded a `tracing` macro
+  (a static callsite, its field set and the enabled check) at every span and
+  event, up to a dozen per method, and type-checking and borrow-checking that
+  code was most of the compile time of a crate with a large trait. They now
+  call plain functions in `transport::rpc_trace`, where each callsite exists
+  once. A crate with 132 RPC methods went from 54 s to 12 s of `cargo check`.
+  Spans, levels, messages and fields are unchanged. **The `target` of these
+  spans and events changes** from the module path of the crate holding the
+  trait to `allex.rpc.client` / `allex.rpc.server` (the span names): a filter
+  such as `RUST_LOG=my_crate=debug` no longer shows them; use
+  `allex.rpc=debug`. `examples/arithmetic_tests/tests/rpc_tracing.rs` pins
+  what a subscriber sees.
 - **`CredentialStore` logout ends the whole sign-in session, and its forks.**
   Access tokens now carry a session id (`sid`, one per login, kept through
   refresh, a new one per `fork`, recorded as a fork of the forking session).

@@ -300,14 +300,7 @@ fn expand_rpc_module(mut trait_item: ItemTrait) -> syn::Result<proc_macro2::Toke
                 caller_role: ::std::option::Option<&str>,
             ) -> ::execution::Response {
                 if !#permissions_ident::is_authorized(method, caller_role) {
-                    ::transport::tracing::warn!(
-                        rpc_module = #module_name,
-                        rpc_method = method,
-                        rpc_side = "server",
-                        outcome = "access_forbidden",
-                        caller_role = caller_role.unwrap_or("anonymous"),
-                        "rpc server authorization denied"
-                    );
+                    ::transport::rpc_trace::server_denied(#module_name, method, caller_role);
                     return ::execution::Response::TransportError(
                         ::transport::Error::AccessForbidden,
                     );
@@ -558,13 +551,7 @@ impl MethodInfo {
                     &self,
                     req: #request_ty,
                 ) -> ::transport::ProgressOutcome<#success_ty, #error_ty, ::transport::Error> {
-                    let __allex_span = ::transport::tracing::debug_span!(
-                        "allex.rpc.client",
-                        rpc_module = #module_name,
-                        rpc_method = #method_name,
-                        rpc_kind = "unary",
-                        rpc_side = "client",
-                    );
+                    let __allex_span = ::transport::rpc_trace::client_span(#module_name, #method_name, "unary");
                     let __allex_result = {
                         let _guard = __allex_span.enter();
                         #decode_helper_ident::<C, #success_ty, #error_ty>(
@@ -579,16 +566,16 @@ impl MethodInfo {
                     };
                     match &__allex_result {
                         ::transport::ProgressOutcome::Success(_) => {
-                            ::transport::tracing::debug!(parent: &__allex_span, outcome = "success", "rpc unary client call finished");
+                            ::transport::rpc_trace::unary_client_success(&__allex_span);
                         }
                         ::transport::ProgressOutcome::Error(_) => {
-                            ::transport::tracing::debug!(parent: &__allex_span, outcome = "app_error", "rpc unary client call finished");
+                            ::transport::rpc_trace::unary_client_app_error(&__allex_span);
                         }
                         ::transport::ProgressOutcome::Transport(::transport::TransportIssue::Interrupted) => {
-                            ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_interrupted", "rpc unary client call interrupted");
+                            ::transport::rpc_trace::unary_client_interrupted(&__allex_span);
                         }
                         ::transport::ProgressOutcome::Transport(::transport::TransportIssue::Error(error)) => {
-                            ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc unary client call failed");
+                            ::transport::rpc_trace::unary_client_failed(&__allex_span, error);
                         }
                     }
                     __allex_result
@@ -610,13 +597,7 @@ impl MethodInfo {
                         ::transport::Error,
                     >,
                 > {
-                    let __allex_span = ::transport::tracing::debug_span!(
-                        "allex.rpc.client",
-                        rpc_module = #module_name,
-                        rpc_method = #method_name,
-                        rpc_kind = "streaming",
-                        rpc_side = "client",
-                    );
+                    let __allex_span = ::transport::rpc_trace::client_span(#module_name, #method_name, "streaming");
                     let response_stream = {
                         let _guard = __allex_span.enter();
                         <T as ::transport::ClientSideChunkedTransport<C, #request_ty>>::execute_module_method_call_stream(
@@ -627,7 +608,7 @@ impl MethodInfo {
                         )
                         .await?
                     };
-                    ::transport::tracing::debug!(parent: &__allex_span, "rpc streaming client call started");
+                    ::transport::rpc_trace::stream_client_started(&__allex_span);
 
                     Ok(::progressable_future::ProgressableFuture::new_with_transport(
                         move |sender| {
@@ -649,7 +630,7 @@ impl MethodInfo {
                                             ::futures::future::Either::Left((Some(frame), _)) => frame,
                                             ::futures::future::Either::Left((None, _)) => break,
                                             ::futures::future::Either::Right(_) => {
-                                                ::transport::tracing::debug!(parent: &__allex_span, outcome = "abandoned", "rpc streaming client call abandoned by its caller");
+                                                ::transport::rpc_trace::stream_client_abandoned(&__allex_span);
                                                 return ::transport::ProgressOutcome::Transport(
                                                     ::transport::TransportIssue::Interrupted,
                                                 );
@@ -658,7 +639,7 @@ impl MethodInfo {
                                     };
                                     match frame {
                                         Err(error) => {
-                                            ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc streaming client call failed");
+                                            ::transport::rpc_trace::stream_client_failed(&__allex_span, &error);
                                             return ::transport::ProgressOutcome::Transport(
                                                 ::transport::TransportIssue::Error(error),
                                             );
@@ -667,23 +648,23 @@ impl MethodInfo {
                                             let progress = match payload.decode::<C, #progress_ty>() {
                                                 Ok(progress) => progress,
                                                 Err(error) => {
-                                                    ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc streaming client progress decode failed");
+                                                    ::transport::rpc_trace::stream_client_progress_decode_failed(&__allex_span, &error);
                                                     return ::transport::ProgressOutcome::Transport(
                                                         ::transport::TransportIssue::Error(error),
                                                     );
                                                 }
                                             };
-                                            ::transport::tracing::trace!(parent: &__allex_span, outcome = "progress", "rpc streaming client progress");
+                                            ::transport::rpc_trace::stream_client_progress(&__allex_span);
                                             sender.progress(progress);
                                         }
                                         Ok(::transport::CallResponse::Success(payload)) => {
                                             return match payload.decode::<C, #success_ty>() {
                                                 Ok(result) => {
-                                                    ::transport::tracing::debug!(parent: &__allex_span, outcome = "success", "rpc streaming client call finished");
+                                                    ::transport::rpc_trace::stream_client_success(&__allex_span);
                                                     ::transport::ProgressOutcome::Success(result)
                                                 }
                                                 Err(error) => {
-                                                    ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc streaming client success decode failed");
+                                                    ::transport::rpc_trace::stream_client_success_decode_failed(&__allex_span, &error);
                                                     ::transport::ProgressOutcome::Transport(
                                                         ::transport::TransportIssue::Error(error),
                                                     )
@@ -693,11 +674,11 @@ impl MethodInfo {
                                         Ok(::transport::CallResponse::Error(payload)) => {
                                             return match payload.decode::<C, #error_ty>() {
                                                 Ok(error) => {
-                                                    ::transport::tracing::debug!(parent: &__allex_span, outcome = "app_error", "rpc streaming client call finished");
+                                                    ::transport::rpc_trace::stream_client_app_error(&__allex_span);
                                                     ::transport::ProgressOutcome::Error(error)
                                                 }
                                                 Err(error) => {
-                                                    ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_error", transport_error = ?error, "rpc streaming client error decode failed");
+                                                    ::transport::rpc_trace::stream_client_error_decode_failed(&__allex_span, &error);
                                                     ::transport::ProgressOutcome::Transport(
                                                         ::transport::TransportIssue::Error(error),
                                                     )
@@ -707,7 +688,7 @@ impl MethodInfo {
                                     }
                                 }
 
-                                ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_interrupted", "rpc streaming client call interrupted");
+                                ::transport::rpc_trace::stream_client_interrupted(&__allex_span);
                                 ::transport::ProgressOutcome::Transport(
                                     ::transport::TransportIssue::Interrupted,
                                 )
@@ -741,15 +722,7 @@ impl MethodInfo {
         Some(quote! {
             #method_name => {
                 if !#permissions_ident::is_authorized(#method_name, caller_role) {
-                    ::transport::tracing::warn!(
-                        rpc_module = #module_name,
-                        rpc_method = #method_name,
-                        rpc_kind = "streaming",
-                        rpc_side = "server",
-                        outcome = "access_forbidden",
-                        caller_role = caller_role.unwrap_or("anonymous"),
-                        "rpc streaming server authorization denied"
-                    );
+                    ::transport::rpc_trace::stream_server_denied(#module_name, #method_name, caller_role);
                     return Some(Box::pin(::futures::stream::once(::std::future::ready(
                         ::transport::CallResponse::Error(
                             ::transport::Error::AccessForbidden.surely_encode::<C>(),
@@ -759,47 +732,33 @@ impl MethodInfo {
                 let req = match payload.decode::<C, #request_ty>() {
                     Ok(req) => req,
                     Err(error) => {
-                        ::transport::tracing::warn!(
-                            rpc_module = #module_name,
-                            rpc_method = #method_name,
-                            rpc_kind = "streaming",
-                            rpc_side = "server",
-                            outcome = "decode_error",
-                            transport_error = ?error,
-                            "rpc streaming server request decode failed"
-                        );
+                        ::transport::rpc_trace::stream_server_decode_failed(#module_name, #method_name, &error);
                         return Some(Box::pin(::futures::stream::once(async move {
                             ::transport::CallResponse::Error(error.surely_encode::<C>())
                         })));
                     }
                 };
-                let __allex_span = ::transport::tracing::debug_span!(
-                    "allex.rpc.server",
-                    rpc_module = #module_name,
-                    rpc_method = #method_name,
-                    rpc_kind = "streaming",
-                    rpc_side = "server",
-                );
-                ::transport::tracing::debug!(parent: &__allex_span, "rpc streaming server call started");
+                let __allex_span = ::transport::rpc_trace::server_span(#module_name, #method_name, "streaming");
+                ::transport::rpc_trace::stream_server_started(&__allex_span);
 
                 Some(Box::pin(
                     ::futures::StreamExt::map(self.inner.#method_ident(req).stream(), {
                         let __allex_span = __allex_span.clone();
                         move |step| match step {
                             ::progressable_future::Step::Progress(progress) => {
-                                ::transport::tracing::trace!(parent: &__allex_span, outcome = "progress", "rpc streaming server progress");
+                                ::transport::rpc_trace::stream_server_progress(&__allex_span);
                                 ::transport::CallResponse::Progress(#encode_helper_ident::<C, _>(&progress))
                             }
                             ::progressable_future::Step::Success(result) => {
-                                ::transport::tracing::debug!(parent: &__allex_span, outcome = "success", "rpc streaming server call finished");
+                                ::transport::rpc_trace::stream_server_success(&__allex_span);
                                 ::transport::CallResponse::Success(#encode_helper_ident::<C, _>(&result))
                             }
                             ::progressable_future::Step::Error(error) => {
-                                ::transport::tracing::debug!(parent: &__allex_span, outcome = "app_error", "rpc streaming server call finished");
+                                ::transport::rpc_trace::stream_server_app_error(&__allex_span);
                                 ::transport::CallResponse::Error(#encode_helper_ident::<C, _>(&error))
                             }
                             ::progressable_future::Step::Transport(_) => {
-                                ::transport::tracing::warn!(parent: &__allex_span, outcome = "transport_interrupted", "rpc streaming server stream interrupted");
+                                ::transport::rpc_trace::stream_server_interrupted(&__allex_span);
                                 ::transport::CallResponse::Error(
                                     ::transport::Error::ReceiveResponse("stream interrupted".to_string())
                                         .surely_encode::<C>(),
@@ -836,46 +795,32 @@ impl MethodInfo {
                 let req = match payload.decode::<C, #request_ty>() {
                     Ok(req) => req,
                     Err(error) => {
-                        ::transport::tracing::warn!(
-                            rpc_module = #module_name,
-                            rpc_method = #method_name,
-                            rpc_kind = "unary",
-                            rpc_side = "server",
-                            outcome = "decode_error",
-                            transport_error = ?error,
-                            "rpc unary server request decode failed"
-                        );
+                        ::transport::rpc_trace::unary_server_decode_failed(#module_name, #method_name, &error);
                         return ::execution::Response::Error(error.surely_encode::<C>());
                     }
                 };
-                let __allex_span = ::transport::tracing::debug_span!(
-                    "allex.rpc.server",
-                    rpc_module = #module_name,
-                    rpc_method = #method_name,
-                    rpc_kind = "unary",
-                    rpc_side = "server",
-                );
+                let __allex_span = ::transport::rpc_trace::server_span(#module_name, #method_name, "unary");
                 let _guard = __allex_span.enter();
-                ::transport::tracing::debug!("rpc unary server call started");
+                ::transport::rpc_trace::unary_server_started();
 
                 match #call {
                     Ok(result) => match ::transport::Encodable::encode::<C>(&result) {
                         Ok(encoded) => {
-                            ::transport::tracing::debug!(outcome = "success", "rpc unary server call finished");
+                            ::transport::rpc_trace::unary_server_success();
                             ::execution::Response::Success(encoded)
                         }
                         Err(error) => {
-                            ::transport::tracing::warn!(outcome = "encode_error", transport_error = ?error, "rpc unary server success encode failed");
+                            ::transport::rpc_trace::unary_server_success_encode_failed(&error);
                             ::execution::Response::Error(error.surely_encode::<C>())
                         }
                     },
                     Err(error) => match ::transport::Encodable::encode::<C>(&error) {
                         Ok(encoded) => {
-                            ::transport::tracing::debug!(outcome = "app_error", "rpc unary server call finished");
+                            ::transport::rpc_trace::unary_server_app_error();
                             ::execution::Response::Error(encoded)
                         }
                         Err(encode_error) => {
-                            ::transport::tracing::warn!(outcome = "encode_error", transport_error = ?encode_error, "rpc unary server error encode failed");
+                            ::transport::rpc_trace::unary_server_error_encode_failed(&encode_error);
                             ::execution::Response::Error(encode_error.surely_encode::<C>())
                         }
                     },

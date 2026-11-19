@@ -93,6 +93,8 @@
 
 pub use progressable_future::{ProgressOutcome, TransportIssue};
 pub use tracing;
+#[doc(hidden)]
+pub mod rpc_trace;
 mod transport_types;
 pub use transport_types::*;
 mod transport;
